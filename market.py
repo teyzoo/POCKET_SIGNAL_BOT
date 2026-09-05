@@ -59,10 +59,15 @@ class PocketMarket:
 
     async def auto_login(self) -> str:
         """
-        Резервный автоматический вход.
+        Автоматический вход Pocket Option через
+        BinaryOptionsToolsV2.
 
-        Для Render предпочтительнее использовать PO_SSID.
-        Если PO_SSID задан, этот метод вообще не вызывается.
+        Используется только если PO_SSID отсутствует.
+
+        Важно:
+        автоматический login зависит от того,
+        разрешает ли Pocket Option браузерную
+        авторизацию из окружения Render.
         """
 
         if not config.po_email:
@@ -100,6 +105,9 @@ class PocketMarket:
                 timeout=60,
             )
 
+        except asyncio.CancelledError:
+            raise
+
         except Exception as exc:
             logger.exception(
                 "Pocket Option automatic login failed"
@@ -134,8 +142,7 @@ class PocketMarket:
         1. PO_SSID
         2. PO_EMAIL + PO_PASSWORD
 
-        Если SSID указан, автоматический браузерный login
-        никогда не запускается.
+        Никаких торговых операций здесь нет.
         """
 
         async with self.lock:
@@ -163,7 +170,8 @@ class PocketMarket:
 
                 if not config.po_auto_login:
                     raise RuntimeError(
-                        "PO_SSID не задан, а PO_AUTO_LOGIN выключен."
+                        "PO_SSID не задан, а "
+                        "PO_AUTO_LOGIN выключен."
                     )
 
                 logger.warning(
@@ -179,7 +187,7 @@ class PocketMarket:
                 )
 
             # ------------------------------------------------
-            # Импорт клиента
+            # Import client
             # ------------------------------------------------
 
             try:
@@ -188,14 +196,13 @@ class PocketMarket:
                 )
 
             except Exception as exc:
-
                 raise RuntimeError(
                     "BinaryOptionsToolsV2 не импортируется: "
                     f"{exc}"
                 ) from exc
 
             # ------------------------------------------------
-            # Создание клиента
+            # Create client
             # ------------------------------------------------
 
             try:
@@ -204,22 +211,16 @@ class PocketMarket:
                     "Создаю PocketOptionAsync клиент..."
                 )
 
-                client = PocketOptionAsync(
-                    ssid
-                )
+                client = PocketOptionAsync(ssid)
 
                 self.client = client
                 self.ssid = ssid
 
-                # Библиотеке необходимо время
-                # для инициализации WebSocket.
+                # Даём WebSocket время инициализироваться.
                 await asyncio.sleep(5)
 
                 # ------------------------------------------------
-                # Проверяем, что клиент реально отвечает.
-                #
-                # balance() используется только как health-check.
-                # Торговые операции НЕ выполняются.
+                # Health check
                 # ------------------------------------------------
 
                 try:
@@ -238,8 +239,12 @@ class PocketMarket:
                         )
 
                         logger.info(
-                            "Pocket Option connection health-check OK."
+                            "Pocket Option connection "
+                            "health-check OK."
                         )
+
+                except asyncio.CancelledError:
+                    raise
 
                 except Exception as health_exc:
 
@@ -249,12 +254,12 @@ class PocketMarket:
                         health_exc,
                     )
 
-                    # Не считаем это автоматически критической
-                    # ошибкой: некоторые версии API могут
+                    # Некоторые версии библиотеки могут
                     # подключиться к WebSocket раньше,
                     # чем balance станет доступен.
 
                 self.connected = True
+
                 self.last_success = datetime.now(
                     timezone.utc
                 )
@@ -360,7 +365,6 @@ class PocketMarket:
                 )
 
             except ValueError:
-
                 value = float(text)
 
         number = float(value)
@@ -540,14 +544,9 @@ class PocketMarket:
             int(timeframe),
         )
 
-        # SignalEngine использует минимум 60 свечей
+        # SignalEngine использует историю
         # выбранного timeframe.
-        #
-        # Для 20 минут:
-        #
-        # 20 * 60 = 1200 минут
-        #
-        # + запас.
+
         required = (
             timeframe * 60
         )
@@ -556,6 +555,106 @@ class PocketMarket:
             240,
             required + 180,
         )
+
+    # ========================================================
+    # RESAMPLE
+    # ========================================================
+
+    @staticmethod
+    def _resample_candles(
+        candles: list[Candle],
+        timeframe: int,
+    ) -> list[Candle]:
+
+        timeframe = max(
+            1,
+            int(timeframe),
+        )
+
+        if timeframe == 1:
+            return candles
+
+        if not candles:
+            return []
+
+        result: list[Candle] = []
+
+        bucket: list[Candle] = []
+        bucket_start: datetime | None = None
+
+        for candle in candles:
+
+            timestamp = int(
+                candle.time.timestamp()
+            )
+
+            bucket_seconds = (
+                timeframe * 60
+            )
+
+            current_bucket = (
+                timestamp // bucket_seconds
+            ) * bucket_seconds
+
+            current_start = datetime.fromtimestamp(
+                current_bucket,
+                tz=timezone.utc,
+            )
+
+            if (
+                bucket_start is None
+                or current_start != bucket_start
+            ):
+
+                if bucket:
+                    result.append(
+                        Candle(
+                            time=bucket_start,
+                            open=bucket[0].open,
+                            high=max(
+                                x.high
+                                for x in bucket
+                            ),
+                            low=min(
+                                x.low
+                                for x in bucket
+                            ),
+                            close=bucket[-1].close,
+                            volume=sum(
+                                x.volume
+                                for x in bucket
+                            ),
+                        )
+                    )
+
+                bucket = []
+                bucket_start = current_start
+
+            bucket.append(candle)
+
+        if bucket and bucket_start is not None:
+
+            result.append(
+                Candle(
+                    time=bucket_start,
+                    open=bucket[0].open,
+                    high=max(
+                        x.high
+                        for x in bucket
+                    ),
+                    low=min(
+                        x.low
+                        for x in bucket
+                    ),
+                    close=bucket[-1].close,
+                    volume=sum(
+                        x.volume
+                        for x in bucket
+                    ),
+                )
+            )
+
+        return result
 
     # ========================================================
     # RAW CANDLES
@@ -586,9 +685,6 @@ class PocketMarket:
 
             try:
 
-                # 1m candles.
-                #
-                # limit / 60 = часы истории.
                 hours = max(
                     2.0,
                     (limit / 60.0) + 0.5,
@@ -609,14 +705,6 @@ class PocketMarket:
                     max_rows=limit,
                 )
 
-                # BinaryOptionsToolsV2:
-                #
-                # get_candles_live()
-                # -> async generator
-                #
-                # Первый yield:
-                # (closed_candles, forming_candle)
-
                 first = await asyncio.wait_for(
                     anext(stream),
                     timeout=45,
@@ -634,6 +722,7 @@ class PocketMarket:
                     first,
                     tuple,
                 ):
+
                     if len(first) >= 1:
                         closed = first[0]
 
@@ -644,6 +733,7 @@ class PocketMarket:
                     first,
                     list,
                 ):
+
                     closed = first
 
                 else:
@@ -656,9 +746,6 @@ class PocketMarket:
                 )
 
                 if closed:
-
-                    # Важно:
-                    # закрытые свечи нужны движку сигналов.
                     return closed
 
                 logger.warning(
@@ -695,11 +782,6 @@ class PocketMarket:
 
         try:
 
-            # BinaryOptionsToolsV2 использует offset
-            # в секундах.
-            #
-            # Для N минутных свечей:
-            # N * 60 секунд.
             offset = max(
                 3600,
                 limit * 60,
@@ -761,7 +843,6 @@ class PocketMarket:
             ):
 
                 if key in raw:
-
                     return raw[key]
 
         return raw
@@ -782,7 +863,6 @@ class PocketMarket:
         # ----------------------------------------------------
 
         if not self.is_connected:
-
             await self.connect()
 
         if self.client is None:
@@ -830,12 +910,7 @@ class PocketMarket:
             )
 
         # ----------------------------------------------------
-        # Hard safety limit.
-        #
-        # 20m timeframe:
-        # 1380 candles.
-        #
-        # 1600 хватает с запасом.
+        # Hard safety limit
         # ----------------------------------------------------
 
         limit = max(
@@ -1045,6 +1120,30 @@ class PocketMarket:
             )
 
         # ----------------------------------------------------
+        # RESAMPLE
+        # ----------------------------------------------------
+
+        if minutes > 1:
+
+            result = self._resample_candles(
+                result,
+                minutes,
+            )
+
+            if len(result) < 60:
+
+                raise RuntimeError(
+                    f"После преобразования в "
+                    f"{minutes}-минутный timeframe "
+                    f"осталось только {len(result)} свечей."
+                )
+
+            result = result[-max(
+                60,
+                limit // minutes,
+            ):]
+
+        # ----------------------------------------------------
         # Success
         # ----------------------------------------------------
 
@@ -1065,6 +1164,11 @@ class PocketMarket:
         logger.info(
             "Pair: %s",
             pair,
+        )
+
+        logger.info(
+            "Timeframe: %s min",
+            minutes,
         )
 
         logger.info(
@@ -1157,6 +1261,7 @@ class PocketMarket:
                 if asyncio.iscoroutine(
                     result
                 ):
+
                     await asyncio.wait_for(
                         result,
                         timeout=10,
