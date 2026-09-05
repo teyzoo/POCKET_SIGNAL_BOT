@@ -8,51 +8,34 @@ from datetime import datetime, timezone
 from config import config
 
 
-logger = logging.getLogger(
-    "pocket_market"
-)
+logger = logging.getLogger("pocket_market")
 
 
 @dataclass(slots=True)
 class Candle:
-
     time: datetime
-
     open: float
-
     high: float
-
     low: float
-
     close: float
-
     volume: float = 0.0
 
 
 class PocketMarket:
 
     def __init__(self):
-
         self.client = None
-
         self.ssid: str | None = None
-
         self.lock = asyncio.Lock()
 
     async def auto_login(self) -> str:
 
-        if (
-            not config.po_email
-            or not config.po_password
-        ):
-
+        if not config.po_email or not config.po_password:
             raise RuntimeError(
                 "PO_EMAIL или PO_PASSWORD не заданы."
             )
 
-        from playwright.async_api import (
-            async_playwright,
-        )
+        from playwright.async_api import async_playwright
 
         logger.info(
             "Пробую обычный вход Pocket Option..."
@@ -61,13 +44,10 @@ class PocketMarket:
         async with async_playwright() as p:
 
             browser = await p.chromium.launch(
-                headless=True,
+                headless=True
             )
 
-            context = (
-                await browser.new_context()
-            )
-
+            context = await browser.new_context()
             page = await context.new_page()
 
             try:
@@ -78,9 +58,7 @@ class PocketMarket:
                     timeout=60000,
                 )
 
-                await page.wait_for_timeout(
-                    3000
-                )
+                await page.wait_for_timeout(3000)
 
                 email_input = page.locator(
                     'input[type="email"], '
@@ -96,14 +74,12 @@ class PocketMarket:
 
                 if await email_input.count() == 0:
                     raise RuntimeError(
-                        "Поле E-mail на странице Pocket Option "
-                        "не найдено."
+                        "Поле E-mail Pocket Option не найдено."
                     )
 
                 if await password_input.count() == 0:
                     raise RuntimeError(
-                        "Поле пароля на странице Pocket Option "
-                        "не найдено."
+                        "Поле пароля Pocket Option не найдено."
                     )
 
                 await email_input.fill(
@@ -121,55 +97,39 @@ class PocketMarket:
 
                 if await submit.count() == 0:
                     raise RuntimeError(
-                        "Кнопка входа Pocket Option "
-                        "не найдена."
+                        "Кнопка входа Pocket Option не найдена."
                     )
 
                 await submit.click()
 
-                await page.wait_for_timeout(
-                    8000
+                await page.wait_for_timeout(8000)
+
+                cookies = await context.cookies()
+
+                ssid = next(
+                    (
+                        str(c.get("value"))
+                        for c in cookies
+                        if str(
+                            c.get("name", "")
+                        ).lower() == "ssid"
+                    ),
+                    None,
                 )
-
-                cookies = (
-                    await context.cookies()
-                )
-
-                ssid = None
-
-                for cookie in cookies:
-
-                    name = str(
-                        cookie.get(
-                            "name",
-                            "",
-                        )
-                    ).lower()
-
-                    if name == "ssid":
-
-                        ssid = cookie.get(
-                            "value"
-                        )
-
-                        break
 
                 if not ssid:
-
                     raise RuntimeError(
                         "Pocket Option не выдал SSID после входа. "
-                        "Возможна CAPTCHA, 2FA, дополнительная "
-                        "проверка или изменение страницы входа."
+                        "Возможна CAPTCHA, 2FA или дополнительная проверка."
                     )
 
                 logger.info(
                     "Сессия Pocket Option получена."
                 )
 
-                return str(ssid)
+                return ssid
 
             finally:
-
                 await browser.close()
 
     async def connect(self):
@@ -177,7 +137,6 @@ class PocketMarket:
         async with self.lock:
 
             if self.client is not None:
-
                 return
 
             ssid = config.po_ssid.strip()
@@ -186,27 +145,20 @@ class PocketMarket:
                 not ssid
                 and config.po_auto_login
             ):
-
-                ssid = (
-                    await self.auto_login()
-                )
+                ssid = await self.auto_login()
 
             if not ssid:
-
                 raise RuntimeError(
                     "Нет сессии Pocket Option. "
-                    "Задай PO_SSID либо "
-                    "PO_EMAIL + PO_PASSWORD."
+                    "Задай PO_SSID либо PO_EMAIL + PO_PASSWORD."
                 )
 
             from BinaryOptionsToolsV2.pocketoption import (
-                PocketOptionAsync,
+                PocketOptionAsync
             )
 
-            self.client = (
-                PocketOptionAsync(
-                    ssid
-                )
+            self.client = PocketOptionAsync(
+                ssid
             )
 
             self.ssid = ssid
@@ -220,13 +172,9 @@ class PocketMarket:
     @staticmethod
     def _timestamp(value) -> datetime:
 
-        if isinstance(
-            value,
-            datetime,
-        ):
+        if isinstance(value, datetime):
 
             if value.tzinfo is None:
-
                 return value.replace(
                     tzinfo=timezone.utc
                 )
@@ -235,10 +183,7 @@ class PocketMarket:
                 timezone.utc
             )
 
-        if isinstance(
-            value,
-            str,
-        ):
+        if isinstance(value, str):
 
             text = value.strip()
 
@@ -247,12 +192,11 @@ class PocketMarket:
                 dt = datetime.fromisoformat(
                     text.replace(
                         "Z",
-                        "+00:00",
+                        "+00:00"
                     )
                 )
 
                 if dt.tzinfo is None:
-
                     dt = dt.replace(
                         tzinfo=timezone.utc
                     )
@@ -262,141 +206,210 @@ class PocketMarket:
                 )
 
             except ValueError:
-
-                return datetime.fromtimestamp(
-                    float(text),
-                    tz=timezone.utc,
-                )
+                value = float(text)
 
         return datetime.fromtimestamp(
             float(value),
-            tz=timezone.utc,
+            tz=timezone.utc
         )
 
     @staticmethod
-    def _read(item, name, default=None):
+    def _read(
+        item,
+        name,
+        default=None
+    ):
 
-        if isinstance(
-            item,
-            dict,
-        ):
-
+        if isinstance(item, dict):
             return item.get(
                 name,
-                default,
+                default
             )
 
         return getattr(
             item,
             name,
-            default,
+            default
         )
 
     def _parse_candle(
         self,
-        item,
+        item
     ) -> Candle | None:
 
         try:
 
             timestamp = self._read(
                 item,
-                "time",
-                None,
+                "time"
             )
 
             if timestamp is None:
-
                 timestamp = self._read(
                     item,
-                    "timestamp",
-                    None,
+                    "timestamp"
                 )
 
             if timestamp is None:
-
                 timestamp = self._read(
                     item,
-                    "from",
-                    None,
+                    "from"
                 )
 
             if timestamp is None:
-
                 return None
 
-            open_price = self._read(
-                item,
-                "open",
-                None,
-            )
-
-            high_price = self._read(
-                item,
-                "high",
-                None,
-            )
-
-            low_price = self._read(
-                item,
-                "low",
-                None,
-            )
-
-            close_price = self._read(
-                item,
-                "close",
-                None,
-            )
+            values = [
+                self._read(item, "open"),
+                self._read(item, "high"),
+                self._read(item, "low"),
+                self._read(item, "close"),
+            ]
 
             if any(
-                x is None
-                for x in (
-                    open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                )
+                value is None
+                for value in values
             ):
-
                 return None
 
-            volume = self._read(
-                item,
-                "volume",
-                0,
-            )
-
-            return Candle(
+            candle = Candle(
                 time=self._timestamp(
                     timestamp
                 ),
-                open=float(
-                    open_price
-                ),
-                high=float(
-                    high_price
-                ),
-                low=float(
-                    low_price
-                ),
-                close=float(
-                    close_price
-                ),
+                open=float(values[0]),
+                high=float(values[1]),
+                low=float(values[2]),
+                close=float(values[3]),
                 volume=float(
-                    volume or 0
+                    self._read(
+                        item,
+                        "volume",
+                        0
+                    ) or 0
                 ),
             )
 
-        except Exception:
+            prices = (
+                candle.open,
+                candle.high,
+                candle.low,
+                candle.close,
+            )
 
+            if not all(
+                x == x
+                and abs(x) != float("inf")
+                for x in prices
+            ):
+                return None
+
+            if candle.high < max(
+                candle.open,
+                candle.close
+            ):
+                return None
+
+            if candle.low > min(
+                candle.open,
+                candle.close
+            ):
+                return None
+
+            if candle.high < candle.low:
+                return None
+
+            return candle
+
+        except Exception:
             return None
+
+    async def _get_raw_candles(
+        self,
+        symbol: str,
+        limit: int
+    ):
+
+        live = getattr(
+            self.client,
+            "get_candles_live",
+            None
+        )
+
+        if live is not None:
+
+            try:
+
+                stream = live(
+                    symbol,
+                    period=60,
+                    hours=max(
+                        2.0,
+                        limit / 60.0
+                    ),
+                    max_rows=max(
+                        limit,
+                        200
+                    ),
+                )
+
+                closed, forming = await asyncio.wait_for(
+                    anext(stream),
+                    timeout=25
+                )
+
+                logger.info(
+                    "OTC %s: получено закрытых свечей=%s, forming=%s",
+                    symbol,
+                    len(closed or []),
+                    bool(forming),
+                )
+
+                if closed:
+                    return closed
+
+            except Exception:
+                logger.exception(
+                    "get_candles_live ошибка для %s",
+                    symbol
+                )
+
+        get_method = getattr(
+            self.client,
+            "get_candles",
+            None
+        )
+
+        if get_method is None:
+            raise RuntimeError(
+                "PocketOptionAsync не содержит метода получения свечей."
+            )
+
+        try:
+
+            return await asyncio.wait_for(
+                get_method(
+                    symbol,
+                    60,
+                    max(
+                        3600,
+                        limit * 60
+                    )
+                ),
+                timeout=20
+            )
+
+        except Exception as exc:
+
+            raise RuntimeError(
+                f"Pocket Option не смог получить свечи "
+                f"для {symbol}: {exc}"
+            ) from exc
 
     async def candles(
         self,
         pair: str,
         minutes: int = 5,
-        limit: int = 200,
+        limit: int = 200
     ) -> list[Candle]:
 
         await self.connect()
@@ -406,7 +419,6 @@ class PocketMarket:
         )
 
         if not symbol:
-
             raise ValueError(
                 f"Неизвестная OTC-пара: {pair}"
             )
@@ -415,157 +427,103 @@ class PocketMarket:
             60,
             min(
                 int(limit),
-                1000,
-            ),
+                1000
+            )
         )
 
-        raw = None
-
-        # Сначала используем live-метод,
-        # если он есть в установленной версии библиотеки.
-        live_method = getattr(
-            self.client,
-            "get_candles_live",
-            None,
+        logger.info(
+            "ПРОВЕРКА OTC РЫНКА: %s -> %s",
+            pair,
+            symbol
         )
 
-        if live_method is not None:
-
-            try:
-
-                raw = await live_method(
-                    symbol,
-                    60,
-                )
-
-            except TypeError:
-
-                try:
-
-                    raw = await live_method(
-                        symbol,
-                        period=60,
-                    )
-
-                except Exception:
-
-                    logger.exception(
-                        "Ошибка get_candles_live для %s",
-                        symbol,
-                    )
-
-            except Exception:
-
-                logger.exception(
-                    "Ошибка get_candles_live для %s",
-                    symbol,
-                )
-
-        # Fallback для версий библиотеки,
-        # где доступен старый get_candles.
-        if not raw:
-
-            get_method = getattr(
-                self.client,
-                "get_candles",
-                None,
-            )
-
-            if get_method is None:
-
-                raise RuntimeError(
-                    "У PocketOptionAsync нет метода "
-                    "получения свечей."
-                )
-
-            raw = await get_method(
-                symbol,
-                60,
-                max(
-                    3600,
-                    limit * 60,
-                ),
-            )
+        raw = await self._get_raw_candles(
+            symbol,
+            limit
+        )
 
         if not raw:
+            raise RuntimeError(
+                f"Pocket Option не вернул свечи для {pair}."
+            )
 
-            return []
-
-        # Некоторые версии могут вернуть dict.
-        if isinstance(
-            raw,
-            dict,
-        ):
+        if isinstance(raw, dict):
 
             for key in (
                 "candles",
                 "data",
-                "result",
+                "result"
             ):
 
                 if key in raw:
-
                     raw = raw[key]
-
                     break
 
-        if not isinstance(
-            raw,
-            (list, tuple),
-        ):
+        try:
+            items = list(raw)
 
-            try:
+        except TypeError as exc:
 
-                raw = list(raw)
+            raise RuntimeError(
+                f"Неизвестный формат свечей для {pair}."
+            ) from exc
 
-            except TypeError:
+        parsed = []
 
-                return []
-
-        result: list[Candle] = []
-
-        for item in raw:
+        for item in items:
 
             candle = self._parse_candle(
                 item
             )
 
             if candle is not None:
-
-                result.append(
+                parsed.append(
                     candle
                 )
 
-        result.sort(
-            key=lambda x: x.time
+        unique = {
+            candle.time: candle
+            for candle in parsed
+        }
+
+        result = sorted(
+            unique.values(),
+            key=lambda candle: candle.time
+        )[-limit:]
+
+        if len(result) < 60:
+
+            raise RuntimeError(
+                f"Получено только {len(result)} "
+                f"корректных свечей для {pair}; "
+                f"нужно минимум 60."
+            )
+
+        age = (
+            datetime.now(timezone.utc)
+            - result[-1].time
+        ).total_seconds()
+
+        logger.info(
+            "OTC %s: %s свечей, последняя=%s, возраст=%.1f сек.",
+            pair,
+            len(result),
+            result[-1].time.isoformat(),
+            age,
         )
 
-        # Удаляем дубликаты по времени.
-        unique: dict[
-            datetime,
-            Candle,
-        ] = {}
+        if age > 180:
 
-        for candle in result:
+            raise RuntimeError(
+                f"OTC-данные для {pair} устарели: "
+                f"последняя свеча была {age:.0f} сек. назад."
+            )
 
-            unique[
-                candle.time
-            ] = candle
-
-        result = list(
-            unique.values()
-        )
-
-        result.sort(
-            key=lambda x: x.time
-        )
-
-        return result[-limit:]
+        return result
 
     async def close(self):
 
         if self.client is None:
-
             return
 
         try:
@@ -573,7 +531,7 @@ class PocketMarket:
             shutdown = getattr(
                 self.client,
                 "shutdown",
-                None,
+                None
             )
 
             if shutdown is not None:
@@ -583,7 +541,6 @@ class PocketMarket:
                 if asyncio.iscoroutine(
                     value
                 ):
-
                     await value
 
         except Exception:
