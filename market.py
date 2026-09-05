@@ -55,70 +55,135 @@ class PocketMarket:
         )
 
     # ========================================================
-    # PLAYWRIGHT CHECK
+    # PLAYWRIGHT DIAGNOSTICS
     # ========================================================
 
     @staticmethod
     def _prepare_playwright_environment() -> None:
         """
-        Подготовка окружения Playwright.
+        Проверяет Playwright-браузеры.
 
-        BinaryOptionsToolsV2 иногда пытается использовать
-        системный Google Chrome (/opt/google/chrome/chrome),
-        которого на Render может не быть.
+        ВАЖНО:
+        Здесь НЕЛЬЗЯ самостоятельно менять
+        PLAYWRIGHT_BROWSERS_PATH на Render cache.
 
-        Мы явно указываем стандартный каталог Playwright,
-        если он существует.
+        Render устанавливает браузеры с:
+
+            PLAYWRIGHT_BROWSERS_PATH=0
+            python -m playwright install ...
+
+        При значении "0" Playwright использует локальную
+        директорию браузеров рядом с Python-пакетом.
+
+        Эта функция только диагностирует окружение.
         """
 
-        possible_paths = [
-            os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
-            "/opt/render/project/src/.cache/ms-playwright",
-            "/opt/render/project/.cache/ms-playwright",
-        ]
+        configured_path = os.environ.get(
+            "PLAYWRIGHT_BROWSERS_PATH"
+        )
 
-        for path in possible_paths:
-            if path and os.path.isdir(path):
-                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = path
-
-                logger.info(
-                    "Playwright browsers path: %s",
-                    path,
-                )
-
-                break
+        logger.info(
+            "PLAYWRIGHT_BROWSERS_PATH=%s",
+            configured_path or "<default>",
+        )
 
         try:
             from playwright.sync_api import sync_playwright
 
-            with sync_playwright() as p:
-                browser_type = p.chromium
+        except Exception as exc:
+            raise RuntimeError(
+                "Playwright не импортируется: "
+                f"{exc}"
+            ) from exc
 
-                executable = browser_type.executable_path
+        try:
+            with sync_playwright() as pw:
 
-                if executable:
-                    logger.info(
-                        "Playwright Chromium executable: %s",
-                        executable,
+                chromium_path = pw.chromium.executable_path
+                firefox_path = pw.firefox.executable_path
+
+                logger.info(
+                    "Playwright Chromium executable: %s",
+                    chromium_path,
+                )
+
+                logger.info(
+                    "Playwright Firefox executable: %s",
+                    firefox_path,
+                )
+
+                chromium_exists = bool(
+                    chromium_path
+                    and os.path.isfile(chromium_path)
+                )
+
+                firefox_exists = bool(
+                    firefox_path
+                    and os.path.isfile(firefox_path)
+                )
+
+                logger.info(
+                    "Chromium installed: %s",
+                    chromium_exists,
+                )
+
+                logger.info(
+                    "Firefox installed: %s",
+                    firefox_exists,
+                )
+
+                if not chromium_exists:
+                    raise RuntimeError(
+                        "Playwright Chromium не установлен. "
+                        f"Ожидаемый путь: {chromium_path}. "
+                        "Проверь render.yaml и "
+                        "PLAYWRIGHT_BROWSERS_PATH=0."
                     )
 
-                    if os.path.exists(executable):
-                        logger.info(
-                            "Playwright Chromium найден."
-                        )
-                    else:
-                        logger.warning(
-                            "Playwright Chromium executable "
-                            "не найден по пути: %s",
-                            executable,
-                        )
+                # ------------------------------------------------
+                # Реально запускаем Chromium.
+                #
+                # Это важнее простой проверки файла:
+                # файл может существовать, но браузер может
+                # не запускаться из-за зависимостей Linux.
+                # ------------------------------------------------
 
-        except Exception as exc:
-            logger.warning(
-                "Не удалось предварительно проверить "
-                "Playwright Chromium: %s",
-                exc,
+                logger.info(
+                    "Проверяю фактический запуск Playwright Chromium..."
+                )
+
+                browser = None
+
+                try:
+                    browser = pw.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-dev-shm-usage",
+                        ],
+                    )
+
+                    logger.info(
+                        "Playwright Chromium успешно запущен."
+                    )
+
+                finally:
+                    if browser is not None:
+                        try:
+                            browser.close()
+                        except Exception:
+                            logger.exception(
+                                "Ошибка закрытия диагностического Chromium."
+                            )
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception:
+            logger.exception(
+                "Диагностика Playwright завершилась ошибкой."
             )
+            raise
 
     # ========================================================
     # AUTO LOGIN
@@ -131,14 +196,18 @@ class PocketMarket:
 
         Используется только если PO_SSID отсутствует.
 
-        Важно:
-        автоматическая авторизация зависит от того,
-        разрешает ли Pocket Option браузерную
-        авторизацию из окружения Render.
+        Алгоритм:
 
-        Мы используем backend="playwright", чтобы
-        BinaryOptionsToolsV2 не выбирал системный Chrome
-        как основной backend.
+        1. Проверяем email/password.
+        2. Проверяем Playwright Chromium.
+        3. Вызываем BinaryOptionsToolsV2 login().
+        4. Получаем SSID.
+        5. Возвращаем SSID для PocketOptionAsync.
+
+        CAPTCHA здесь не обходится.
+        Если Pocket Option действительно требует
+        дополнительную проверку, ошибка будет показана
+        как отдельная причина.
         """
 
         if not config.po_email:
@@ -157,7 +226,10 @@ class PocketMarket:
         )
 
         # ----------------------------------------------------
-        # Подготовка Playwright
+        # Проверяем Playwright в отдельном thread.
+        #
+        # sync_playwright нельзя выполнять непосредственно
+        # внутри async event loop.
         # ----------------------------------------------------
 
         try:
@@ -169,11 +241,12 @@ class PocketMarket:
             raise
 
         except Exception as exc:
-            logger.warning(
-                "Проверка Playwright завершилась "
-                "с предупреждением: %s",
-                exc,
-            )
+            self.last_error = str(exc)
+
+            raise RuntimeError(
+                "Playwright не готов для автоматического "
+                f"входа Pocket Option: {exc}"
+            ) from exc
 
         # ----------------------------------------------------
         # Import login
@@ -185,8 +258,11 @@ class PocketMarket:
             )
 
         except Exception as exc:
+            self.last_error = str(exc)
+
             raise RuntimeError(
-                "Не удалось импортировать Pocket Option login: "
+                "Не удалось импортировать "
+                "BinaryOptionsToolsV2 Pocket Option login: "
                 f"{exc}"
             ) from exc
 
@@ -195,6 +271,9 @@ class PocketMarket:
         # ----------------------------------------------------
 
         try:
+            logger.info(
+                "Calling BinaryOptionsToolsV2 login backend=playwright..."
+            )
 
             ssid = await asyncio.to_thread(
                 login,
@@ -211,45 +290,77 @@ class PocketMarket:
 
         except Exception as exc:
 
+            error_text = str(exc)
+            error_lower = error_text.lower()
+
+            self.last_error = error_text
+
+            # ------------------------------------------------
+            # ВАЖНО:
+            # Не называем ошибку CAPTCHA автоматически.
+            #
+            # Старая версия делала это неправильно.
+            # Ошибка могла быть обычной ошибкой браузера.
+            # ------------------------------------------------
+
+            if (
+                "captcha" in error_lower
+                or "recaptcha" in error_lower
+            ):
+                logger.error(
+                    "Pocket Option сообщил о CAPTCHA/"
+                    "дополнительной проверке."
+                )
+
+                raise RuntimeError(
+                    "Pocket Option действительно потребовал "
+                    "CAPTCHA/дополнительную проверку. "
+                    "Автоматический вход остановлен. "
+                    f"Детали: {error_text}"
+                ) from exc
+
+            if (
+                "chromium distribution" in error_lower
+                or "chrome is not found" in error_lower
+                or "browser executable" in error_lower
+                or "executable doesn't exist" in error_lower
+            ):
+                logger.error(
+                    "Ошибка браузера Playwright: %s",
+                    error_text,
+                )
+
+                raise RuntimeError(
+                    "Playwright не смог запустить браузер. "
+                    "Проверь установку Chromium в Render. "
+                    f"Детали: {error_text}"
+                ) from exc
+
+            if (
+                "firewall" in error_lower
+                or "network" in error_lower
+                or "connection" in error_lower
+                or "timed out" in error_lower
+                or "timeout" in error_lower
+            ):
+                logger.error(
+                    "Ошибка сетевого подключения Pocket Option: %s",
+                    error_text,
+                )
+
+                raise RuntimeError(
+                    "Pocket Option недоступен из окружения Render "
+                    "или соединение завершилось по timeout. "
+                    f"Детали: {error_text}"
+                ) from exc
+
             logger.exception(
                 "Pocket Option automatic login failed"
             )
 
-            error_text = str(exc)
-
-            # ------------------------------------------------
-            # Более понятные сообщения
-            # ------------------------------------------------
-
-            if "chrome is not found" in error_text.lower():
-
-                raise RuntimeError(
-                    "Playwright/BinaryOptionsToolsV2 "
-                    "не смог найти браузер Chrome. "
-                    "Проверь buildCommand Render: "
-                    "python -m playwright install "
-                    "--with-deps chromium firefox"
-                ) from exc
-
-            if "captcha" in error_text.lower():
-
-                raise RuntimeError(
-                    "Pocket Option потребовал CAPTCHA/"
-                    "дополнительную проверку. "
-                    "Автоматический вход остановлен."
-                ) from exc
-
-            if "firewall" in error_text.lower():
-
-                raise RuntimeError(
-                    "Pocket Option не удалось открыть "
-                    "из окружения Render. "
-                    "Возможна блокировка соединения."
-                ) from exc
-
             raise RuntimeError(
                 "Автоматическая авторизация Pocket Option "
-                f"не удалась: {exc}"
+                f"не удалась: {error_text}"
             ) from exc
 
         # ----------------------------------------------------
@@ -257,16 +368,30 @@ class PocketMarket:
         # ----------------------------------------------------
 
         if not ssid:
+            self.last_error = (
+                "Pocket Option login не вернул SSID."
+            )
 
             raise RuntimeError(
                 "Pocket Option login не вернул SSID."
+            )
+
+        ssid = str(ssid).strip()
+
+        if not ssid:
+            self.last_error = (
+                "Pocket Option login вернул пустой SSID."
+            )
+
+            raise RuntimeError(
+                "Pocket Option login вернул пустой SSID."
             )
 
         logger.info(
             "Pocket Option SSID успешно получен."
         )
 
-        return str(ssid)
+        return ssid
 
     # ========================================================
     # CONNECT
@@ -326,7 +451,19 @@ class PocketMarket:
                     "Переходим к автоматическому входу."
                 )
 
-                ssid = await self.auto_login()
+                try:
+                    ssid = await self.auto_login()
+
+                except asyncio.CancelledError:
+                    raise
+
+                except Exception as exc:
+                    self.last_error = str(exc)
+
+                    raise RuntimeError(
+                        "Не удалось получить SSID через "
+                        f"автоматический вход: {exc}"
+                    ) from exc
 
             if not ssid:
 
@@ -345,6 +482,8 @@ class PocketMarket:
                 )
 
             except Exception as exc:
+
+                self.last_error = str(exc)
 
                 raise RuntimeError(
                     "BinaryOptionsToolsV2 не импортируется: "
@@ -366,8 +505,13 @@ class PocketMarket:
                 self.client = client
                 self.ssid = ssid
 
-                # Даём WebSocket время
-                # инициализироваться.
+                # ------------------------------------------------
+                # Даём WebSocket время инициализироваться.
+                # ------------------------------------------------
+
+                logger.info(
+                    "Ожидание инициализации Pocket Option WebSocket..."
+                )
 
                 await asyncio.sleep(5)
 
@@ -375,15 +519,19 @@ class PocketMarket:
                 # Health check
                 # ------------------------------------------------
 
-                try:
+                balance_method = getattr(
+                    client,
+                    "balance",
+                    None,
+                )
 
-                    balance_method = getattr(
-                        client,
-                        "balance",
-                        None,
+                if balance_method is not None:
+
+                    logger.info(
+                        "Выполняю Pocket Option balance health-check..."
                     )
 
-                    if balance_method is not None:
+                    try:
 
                         result = balance_method()
 
@@ -399,26 +547,40 @@ class PocketMarket:
                             "health-check OK."
                         )
 
-                except asyncio.CancelledError:
-                    raise
+                    except asyncio.CancelledError:
+                        raise
 
-                except Exception as health_exc:
+                    except Exception as health_exc:
+
+                        logger.warning(
+                            "Pocket Option balance health-check "
+                            "не прошёл: %s",
+                            health_exc,
+                        )
+
+                        # Не считаем это автоматически фатальной
+                        # ошибкой: некоторые версии библиотеки
+                        # могут подключить WebSocket немного
+                        # раньше доступности balance.
+
+                else:
 
                     logger.warning(
-                        "Pocket Option health-check balance "
-                        "не прошёл: %s",
-                        health_exc,
+                        "PocketOptionAsync не содержит balance(). "
+                        "Продолжаю с WebSocket-подключением."
                     )
 
-                    # Некоторые версии библиотеки могут
-                    # подключиться к WebSocket раньше,
-                    # чем balance станет доступен.
+                # ------------------------------------------------
+                # Connected
+                # ------------------------------------------------
 
                 self.connected = True
 
                 self.last_success = datetime.now(
                     timezone.utc
                 )
+
+                self.last_error = None
 
                 logger.info(
                     "=============================================="
