@@ -1,626 +1,310 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
-import time
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime, timezone
 
 from config import config
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(
+    "pocket_market"
+)
 
 
-# ============================================================
-# CANDLE
-# ============================================================
-
-@dataclass
+@dataclass(slots=True)
 class Candle:
-    timestamp: int
+
+    time: datetime
+
     open: float
+
     high: float
+
     low: float
+
     close: float
+
     volume: float = 0.0
 
 
-# ============================================================
-# MARKET CLIENT
-# ============================================================
-
-class MarketClient:
-    """
-    Pocket Option OTC market-data client.
-
-    IMPORTANT:
-    This class is deliberately signal-only.
-    It does not place trades.
-
-    It expects an unofficial Pocket Option WebSocket client
-    to be available when PO_SSID is configured.
-
-    Supported external client styles:
-        - get_historical_candles(...)
-        - get_candles(...)
-        - get_candles_dataframe(...)
-    """
+class PocketMarket:
 
     def __init__(self):
-        self.client: Any | None = None
-
-        self.started = False
-
-        self.cache: dict[
-            str,
-            tuple[float, list[Candle]]
-        ] = {}
-
-        self.cache_ttl = 5.0
-
-        self._lock = asyncio.Lock()
-
-    # ========================================================
-    # START
-    # ========================================================
-
-    async def start(self) -> None:
-        if self.started:
-            return
-
-        self.started = True
-
-        if not config.po_ssid:
-            logger.warning(
-                "PO_SSID is not configured. "
-                "Real Pocket Option OTC candles are unavailable."
-            )
-            return
-
-        await self._connect_pocket_option()
-
-    # ========================================================
-    # CLOSE
-    # ========================================================
-
-    async def close(self) -> None:
-        client = self.client
-
-        if client is None:
-            self.started = False
-            return
-
-        try:
-            method = getattr(
-                client,
-                "disconnect",
-                None,
-            )
-
-            if method is None:
-                method = getattr(
-                    client,
-                    "disconnect_websocket",
-                    None,
-                )
-
-            if method is not None:
-                result = method()
-
-                if inspect.isawaitable(result):
-                    await result
-
-        except Exception as exc:
-            logger.warning(
-                "Pocket Option disconnect error: %s",
-                exc,
-            )
-
-        self.client = None
-        self.started = False
-
-    # ========================================================
-    # CONNECT
-    # ========================================================
-
-    async def _connect_pocket_option(self) -> None:
-        """
-        Try supported unofficial Pocket Option clients.
-
-        We intentionally do not hard-code a single third-party
-        package because their APIs change frequently.
-        """
-
-        client = None
-
-        # ----------------------------------------------------
-        # New async-style client
-        # ----------------------------------------------------
-
-        try:
-            from pocketoptionapi_async import (
-                AsyncPocketOptionClient,
-            )
-
-            client = AsyncPocketOptionClient(
-                config.po_ssid,
-                is_demo=config.po_demo,
-                enable_logging=False,
-            )
-
-            result = client.connect()
-
-            if inspect.isawaitable(result):
-                await result
-
-            self.client = client
-
-            logger.info(
-                "Connected to Pocket Option OTC feed "
-                "using AsyncPocketOptionClient"
-            )
-
-            return
-
-        except ImportError:
-            pass
-
-        except Exception as exc:
-            logger.warning(
-                "Async Pocket Option client connection failed: %s",
-                exc,
-            )
-
-        # ----------------------------------------------------
-        # Stable-style client
-        # ----------------------------------------------------
-
-        try:
-            from pocketoptionapi.stable_api import (
-                PocketOption,
-            )
-
-            client = PocketOption(
-                ssid=config.po_ssid,
-                demo=config.po_demo,
-            )
-
-            result = client.connect()
-
-            if inspect.isawaitable(result):
-                await result
-
-            self.client = client
-
-            logger.info(
-                "Connected to Pocket Option OTC feed "
-                "using stable PocketOption client"
-            )
-
-            return
-
-        except ImportError:
-            pass
-
-        except Exception as exc:
-            logger.warning(
-                "Stable Pocket Option client connection failed: %s",
-                exc,
-            )
-
-        # ----------------------------------------------------
-        # No client
-        # ----------------------------------------------------
 
         self.client = None
 
-        logger.error(
-            "No compatible Pocket Option API client is installed. "
-            "Install a compatible Pocket Option data client and "
-            "configure PO_SSID in Render."
+        self.ssid = None
+
+        self.lock = asyncio.Lock()
+
+    async def auto_login(self) -> str:
+
+        if (
+            not config.po_email
+            or not config.po_password
+        ):
+
+            raise RuntimeError(
+                "PO_EMAIL или PO_PASSWORD не заданы."
+            )
+
+        from playwright.async_api import (
+            async_playwright,
         )
 
-    # ========================================================
-    # CANDLES
-    # ========================================================
+        logger.info(
+            "Пробую обычный вход Pocket Option..."
+        )
+
+        async with async_playwright() as p:
+
+            browser = await p.chromium.launch(
+                headless=True
+            )
+
+            context = (
+                await browser.new_context()
+            )
+
+            page = await context.new_page()
+
+            try:
+
+                await page.goto(
+                    config.po_login_url,
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+
+                await page.wait_for_timeout(
+                    3000
+                )
+
+                email_input = page.locator(
+                    'input[type="email"], '
+                    'input[name="email"], '
+                    'input[name="login"]'
+                ).first
+
+                password_input = page.locator(
+                    'input[type="password"], '
+                    'input[name="password"]'
+                ).first
+
+                await email_input.fill(
+                    config.po_email
+                )
+
+                await password_input.fill(
+                    config.po_password
+                )
+
+                submit = page.locator(
+                    'button[type="submit"], '
+                    'input[type="submit"]'
+                ).first
+
+                await submit.click()
+
+                await page.wait_for_timeout(
+                    8000
+                )
+
+                cookies = (
+                    await context.cookies()
+                )
+
+                ssid = None
+
+                for cookie in cookies:
+
+                    if (
+                        cookie["name"]
+                        .lower()
+                        == "ssid"
+                    ):
+
+                        ssid = cookie["value"]
+
+                        break
+
+                if not ssid:
+
+                    raise RuntimeError(
+                        "Pocket Option не выдал SSID после входа. "
+                        "Возможна CAPTCHA, дополнительная проверка "
+                        "или изменение страницы входа."
+                    )
+
+                logger.info(
+                    "Сессия Pocket Option получена."
+                )
+
+                return ssid
+
+            finally:
+
+                await browser.close()
+
+    async def connect(self):
+
+        async with self.lock:
+
+            if self.client is not None:
+
+                return
+
+            ssid = config.po_ssid.strip()
+
+            if (
+                not ssid
+                and config.po_auto_login
+            ):
+
+                ssid = (
+                    await self.auto_login()
+                )
+
+            if not ssid:
+
+                raise RuntimeError(
+                    "Нет сессии Pocket Option. "
+                    "Укажи PO_EMAIL/PO_PASSWORD "
+                    "или PO_SSID."
+                )
+
+            from BinaryOptionsToolsV2.pocketoption import (
+                PocketOptionAsync,
+            )
+
+            self.client = (
+                PocketOptionAsync(ssid)
+            )
+
+            self.ssid = ssid
+
+            await asyncio.sleep(5)
+
+            logger.info(
+                "Pocket Option OTC клиент подключён."
+            )
 
     async def candles(
         self,
         pair: str,
-        minutes: int = 1,
+        minutes: int = 5,
         limit: int = 200,
     ) -> list[Candle]:
 
-        await self.start()
+        await self.connect()
 
-        if not config.is_otc_pair(pair):
-            logger.warning(
-                "Rejected non-OTC pair: %s",
-                pair,
-            )
-            return []
-
-        symbol = config.pocket_symbol(pair)
+        symbol = config.otc_symbols.get(
+            pair
+        )
 
         if not symbol:
-            logger.warning(
-                "No Pocket Option symbol for: %s",
-                pair,
+
+            raise ValueError(
+                f"Неизвестная OTC-пара: {pair}"
             )
+
+        # Берём 1-минутные OTC свечи.
+        # timeframe используется как срок экспирации.
+        raw = await self.client.get_candles(
+            symbol,
+            60,
+            max(
+                3600,
+                limit * 60,
+            ),
+        )
+
+        if not raw:
+
             return []
 
-        cache_key = (
-            f"{symbol}:{minutes}:{limit}"
-        )
+        result: list[Candle] = []
 
-        cached = self.cache.get(cache_key)
-
-        if cached:
-            created, candles = cached
-
-            if time.time() - created < self.cache_ttl:
-                return candles
-
-        if self.client is None:
-            logger.warning(
-                "No Pocket Option client available for %s",
-                symbol,
-            )
-            return []
-
-        async with self._lock:
-
-            # Another task could have filled the cache.
-            cached = self.cache.get(cache_key)
-
-            if cached:
-                created, candles = cached
-
-                if time.time() - created < self.cache_ttl:
-                    return candles
-
-            try:
-                candles = await self._get_pocket_candles(
-                    symbol=symbol,
-                    minutes=minutes,
-                    limit=limit,
-                )
-
-                candles = self._clean_candles(
-                    candles,
-                    limit,
-                )
-
-                if candles:
-                    self.cache[cache_key] = (
-                        time.time(),
-                        candles,
-                    )
-
-                return candles
-
-            except Exception as exc:
-                logger.exception(
-                    "Failed to load OTC candles for %s: %s",
-                    symbol,
-                    exc,
-                )
-
-                return []
-
-    # ========================================================
-    # POCKET CANDLES
-    # ========================================================
-
-    async def _get_pocket_candles(
-        self,
-        symbol: str,
-        minutes: int,
-        limit: int,
-    ) -> list[Candle]:
-
-        period = int(minutes * 60)
-
-        client = self.client
-
-        # ----------------------------------------------------
-        # get_historical_candles
-        # ----------------------------------------------------
-
-        method = getattr(
-            client,
-            "get_historical_candles",
-            None,
-        )
-
-        if method is not None:
-
-            result = method(
-                symbol,
-                period=period,
-                offset=max(
-                    9000,
-                    limit * 20,
-                ),
-                count_request=1,
-            )
-
-            if inspect.isawaitable(result):
-                result = await result
-
-            return self._normalize_candles(
-                result
-            )
-
-        # ----------------------------------------------------
-        # get_candles
-        # ----------------------------------------------------
-
-        method = getattr(
-            client,
-            "get_candles",
-            None,
-        )
-
-        if method is not None:
-
-            result = method(
-                symbol,
-                period,
-                limit,
-            )
-
-            if inspect.isawaitable(result):
-                result = await result
-
-            return self._normalize_candles(
-                result
-            )
-
-        # ----------------------------------------------------
-        # get_candles_dataframe
-        # ----------------------------------------------------
-
-        method = getattr(
-            client,
-            "get_candles_dataframe",
-            None,
-        )
-
-        if method is not None:
-
-            timeframe = f"{minutes}m"
-
-            result = method(
-                asset=symbol,
-                timeframe=timeframe,
-                count=limit,
-            )
-
-            if inspect.isawaitable(result):
-                result = await result
-
-            return self._normalize_dataframe(
-                result
-            )
-
-        raise RuntimeError(
-            "Installed Pocket Option client does not expose "
-            "a supported historical candle method."
-        )
-
-    # ========================================================
-    # NORMALIZE
-    # ========================================================
-
-    def _normalize_candles(
-        self,
-        data: Any,
-    ) -> list[Candle]:
-
-        if data is None:
-            return []
-
-        if hasattr(data, "to_dict"):
-            return self._normalize_dataframe(data)
-
-        if isinstance(data, dict):
-
-            for key in (
-                "candles",
-                "data",
-                "result",
-                "history",
-            ):
-                if key in data:
-                    data = data[key]
-                    break
-
-        if not isinstance(data, (list, tuple)):
-            return []
-
-        output: list[Candle] = []
-
-        for item in data:
+        for item in raw[-limit:]:
 
             try:
 
-                if isinstance(item, Candle):
-                    output.append(item)
-                    continue
+                timestamp = item.get(
+                    "time",
+                    item.get(
+                        "timestamp"
+                    ),
+                )
 
-                if isinstance(item, dict):
+                if isinstance(
+                    timestamp,
+                    str,
+                ):
 
-                    timestamp = (
-                        item.get("timestamp")
-                        or item.get("time")
-                        or item.get("from")
-                        or item.get("at")
-                    )
-
-                    open_price = (
-                        item.get("open")
-                        or item.get("o")
-                    )
-
-                    high_price = (
-                        item.get("high")
-                        or item.get("h")
-                    )
-
-                    low_price = (
-                        item.get("low")
-                        or item.get("l")
-                    )
-
-                    close_price = (
-                        item.get("close")
-                        or item.get("c")
-                    )
-
-                    volume = (
-                        item.get("volume")
-                        or item.get("v")
-                        or 0
+                    dt = datetime.fromisoformat(
+                        timestamp.replace(
+                            "Z",
+                            "+00:00",
+                        )
                     )
 
                 else:
 
-                    timestamp = getattr(
-                        item,
-                        "timestamp",
-                        getattr(item, "time", None),
+                    dt = datetime.fromtimestamp(
+                        float(timestamp),
+                        tz=timezone.utc,
                     )
 
-                    open_price = getattr(
-                        item,
-                        "open",
-                        None,
-                    )
-
-                    high_price = getattr(
-                        item,
-                        "high",
-                        None,
-                    )
-
-                    low_price = getattr(
-                        item,
-                        "low",
-                        None,
-                    )
-
-                    close_price = getattr(
-                        item,
-                        "close",
-                        None,
-                    )
-
-                    volume = getattr(
-                        item,
-                        "volume",
-                        0,
-                    )
-
-                if None in (
-                    timestamp,
-                    open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                ):
-                    continue
-
-                timestamp = int(float(timestamp))
-
-                # Some APIs return milliseconds.
-                if timestamp > 10_000_000_000:
-                    timestamp //= 1000
-
-                output.append(
+                result.append(
                     Candle(
-                        timestamp=timestamp,
-                        open=float(open_price),
-                        high=float(high_price),
-                        low=float(low_price),
-                        close=float(close_price),
-                        volume=float(volume or 0),
+                        time=dt,
+                        open=float(
+                            item["open"]
+                        ),
+                        high=float(
+                            item["high"]
+                        ),
+                        low=float(
+                            item["low"]
+                        ),
+                        close=float(
+                            item["close"]
+                        ),
+                        volume=float(
+                            item.get(
+                                "volume",
+                                0,
+                            )
+                            or 0
+                        ),
                     )
                 )
 
-            except (
-                TypeError,
-                ValueError,
-                AttributeError,
-            ):
+            except Exception:
+
                 continue
 
-        return output
+        return result
 
-    # ========================================================
-    # DATAFRAME NORMALIZATION
-    # ========================================================
+    async def close(self):
 
-    def _normalize_dataframe(
-        self,
-        dataframe: Any,
-    ) -> list[Candle]:
+        if self.client is None:
 
-        if dataframe is None:
-            return []
+            return
 
         try:
-            rows = dataframe.to_dict(
-                orient="records"
-            )
+
+            await self.client.shutdown()
+
         except Exception:
-            return []
 
-        return self._normalize_candles(rows)
+            logger.exception(
+                "Ошибка закрытия Pocket Option"
+            )
 
-    # ========================================================
-    # CLEAN
-    # ========================================================
-
-    @staticmethod
-    def _clean_candles(
-        candles: list[Candle],
-        limit: int,
-    ) -> list[Candle]:
-
-        if not candles:
-            return []
-
-        unique: dict[int, Candle] = {}
-
-        for candle in candles:
-
-            if candle.close <= 0:
-                continue
-
-            if candle.high <= 0:
-                continue
-
-            if candle.low <= 0:
-                continue
-
-            if candle.high < candle.low:
-                continue
-
-            unique[candle.timestamp] = candle
-
-        result = sorted(
-            unique.values(),
-            key=lambda x: x.timestamp,
-        )
-
-        return result[-limit:]
+        self.client = None
 
 
-# ============================================================
-# GLOBAL MARKET CLIENT
-# ============================================================
-
-market = MarketClient()
+market = PocketMarket()
