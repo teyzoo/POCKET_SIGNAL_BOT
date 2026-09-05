@@ -10,7 +10,7 @@ load_dotenv()
 
 
 # ============================================================
-# HELPERS
+# ENV HELPERS
 # ============================================================
 
 def _env(name: str, default: str = "") -> str:
@@ -20,6 +20,15 @@ def _env(name: str, default: str = "") -> str:
         return default
 
     return value.strip()
+
+
+def _env_first(*names: str, default: str = "") -> str:
+    for name in names:
+        value = _env(name)
+        if value:
+            return value
+
+    return default
 
 
 def _env_int(name: str, default: int = 0) -> int:
@@ -67,17 +76,16 @@ def normalize_database_url(value: str) -> str:
     if not value:
         return ""
 
-    prefixes = (
-        "postgresql+asyncpg://",
-        "postgresql+psycopg2://",
-        "postgresql://",
-        "postgres://",
-    )
-
     if value.startswith("postgresql+asyncpg://"):
         return value
 
-    for prefix in prefixes[1:]:
+    prefixes = (
+        "postgresql://",
+        "postgres://",
+        "postgresql+psycopg2://",
+    )
+
+    for prefix in prefixes:
         if value.startswith(prefix):
             return (
                 "postgresql+asyncpg://"
@@ -116,10 +124,6 @@ PAIRS = [
 ]
 
 
-# ============================================================
-# OTC SYMBOL MAP
-# ============================================================
-
 OTC_SYMBOLS = {
     display_name: symbol
     for display_name, symbol in PAIRS
@@ -154,15 +158,13 @@ BOT_TOKEN = _env("BOT_TOKEN")
 
 OWNER_ID_RAW = _env("OWNER_ID")
 
-OWNER_ID: Optional[int]
+OWNER_ID: Optional[int] = None
 
 if OWNER_ID_RAW:
     try:
         OWNER_ID = int(OWNER_ID_RAW)
     except ValueError:
         OWNER_ID = None
-else:
-    OWNER_ID = None
 
 
 # ============================================================
@@ -223,15 +225,28 @@ TIMEZONE = _env(
 # POCKET OPTION
 # ============================================================
 
-PO_EMAIL = _env("PO_EMAIL")
+# Основные имена.
+#
+# Дополнительно поддерживаются:
+# POCKET_OPTION_EMAIL
+# POCKET_OPTION_PASSWORD
+# POCKET_OPTION_SSID
 
-PO_PASSWORD = _env("PO_PASSWORD")
+PO_EMAIL = _env_first(
+    "PO_EMAIL",
+    "POCKET_OPTION_EMAIL",
+)
 
-PO_SSID = _env("PO_SSID")
+PO_PASSWORD = _env_first(
+    "PO_PASSWORD",
+    "POCKET_OPTION_PASSWORD",
+)
 
-# ВАЖНО:
-# Если есть только email/password, бот автоматически
-# пытается получить SSID.
+PO_SSID = _env_first(
+    "PO_SSID",
+    "POCKET_OPTION_SSID",
+)
+
 PO_AUTO_LOGIN = _env_bool(
     "PO_AUTO_LOGIN",
     True,
@@ -302,6 +317,7 @@ class Config:
     PO_EMAIL: str
     PO_PASSWORD: str
     PO_SSID: str
+
     PO_AUTO_LOGIN: bool
     PO_DEMO: bool
     PO_LOGIN_URL: str
@@ -313,10 +329,6 @@ class Config:
     OTC_DISPLAY_NAMES: dict
 
     ANY_PAIR: str
-
-    # --------------------------------------------------------
-    # lowercase compatibility
-    # --------------------------------------------------------
 
     @property
     def bot_token(self):
@@ -411,6 +423,7 @@ config = Config(
     PO_EMAIL=PO_EMAIL,
     PO_PASSWORD=PO_PASSWORD,
     PO_SSID=PO_SSID,
+
     PO_AUTO_LOGIN=PO_AUTO_LOGIN,
     PO_DEMO=PO_DEMO,
     PO_LOGIN_URL=PO_LOGIN_URL,
