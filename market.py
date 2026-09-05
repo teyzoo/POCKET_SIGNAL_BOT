@@ -54,12 +54,11 @@ class PocketMarket:
             )
         except Exception as exc:
             raise RuntimeError(
-                "Не удалось импортировать Pocket Option login "
-                f"из BinaryOptionsToolsV2: {exc}"
+                "Не удалось импортировать Pocket Option login: "
+                f"{exc}"
             ) from exc
 
         try:
-
             ssid = await asyncio.to_thread(
                 login,
                 config.po_email,
@@ -71,9 +70,8 @@ class PocketMarket:
             )
 
         except Exception as exc:
-
             logger.exception(
-                "Pocket Option login failed"
+                "Pocket Option automatic login failed"
             )
 
             raise RuntimeError(
@@ -103,13 +101,18 @@ class PocketMarket:
             if self.client is not None:
                 return
 
-            ssid = config.po_ssid.strip()
+            ssid = (
+                config.po_ssid.strip()
+                if config.po_ssid
+                else ""
+            )
 
             if not ssid:
 
                 if not config.po_auto_login:
                     raise RuntimeError(
-                        "PO_SSID не задан, а PO_AUTO_LOGIN выключен."
+                        "PO_SSID не задан, "
+                        "а PO_AUTO_LOGIN выключен."
                     )
 
                 ssid = await self.auto_login()
@@ -120,13 +123,10 @@ class PocketMarket:
                 )
 
             try:
-
                 from BinaryOptionsToolsV2.pocketoption import (
                     PocketOptionAsync,
                 )
-
             except Exception as exc:
-
                 raise RuntimeError(
                     "BinaryOptionsToolsV2 не импортируется: "
                     f"{exc}"
@@ -134,52 +134,38 @@ class PocketMarket:
 
             try:
 
-                self.client = PocketOptionAsync(
+                logger.info(
+                    "Создаю PocketOptionAsync клиент..."
+                )
+
+                client = PocketOptionAsync(
                     ssid
                 )
 
+                self.client = client
                 self.ssid = ssid
 
-                # Библиотеке требуется время на
-                # инициализацию WebSocket.
+                # Небольшая инициализация WebSocket.
                 await asyncio.sleep(5)
 
-                # Проверяем, что клиент реально работает.
-                server_time = getattr(
-                    self.client,
-                    "server_time",
-                    None,
-                )
-
-                if server_time is not None:
-
-                    try:
-
-                        value = server_time()
-
-                        if asyncio.iscoroutine(value):
-                            await value
-
-                    except Exception:
-                        logger.warning(
-                            "server_time() недоступен, "
-                            "продолжаю подключение."
-                        )
-
                 logger.info(
-                    "Pocket Option OTC клиент подключён."
+                    "Pocket Option клиент создан."
                 )
 
-            except Exception:
+            except Exception as exc:
 
                 self.client = None
                 self.ssid = None
 
                 logger.exception(
-                    "Ошибка создания Pocket Option клиента."
+                    "Ошибка создания Pocket Option клиента: %s",
+                    exc,
                 )
 
-                raise
+                raise RuntimeError(
+                    "Не удалось создать Pocket Option клиент: "
+                    f"{exc}"
+                ) from exc
 
     # ========================================================
     # TIME
@@ -226,8 +212,6 @@ class PocketMarket:
 
         number = float(value)
 
-        # Некоторые источники могут вернуть
-        # миллисекунды.
         if number > 10_000_000_000:
             number /= 1000.0
 
@@ -237,7 +221,7 @@ class PocketMarket:
         )
 
     # ========================================================
-    # READ OBJECT / DICT
+    # READ
     # ========================================================
 
     @staticmethod
@@ -248,7 +232,6 @@ class PocketMarket:
     ):
 
         if isinstance(item, dict):
-
             return item.get(
                 name,
                 default,
@@ -261,7 +244,7 @@ class PocketMarket:
         )
 
     # ========================================================
-    # PARSE CANDLE
+    # PARSE
     # ========================================================
 
     def _parse_candle(
@@ -322,6 +305,12 @@ class PocketMarket:
             ):
                 return None
 
+            volume = self._read(
+                item,
+                "volume",
+                0,
+            )
+
             candle = Candle(
                 time=self._timestamp(
                     timestamp
@@ -330,14 +319,7 @@ class PocketMarket:
                 high=float(high_price),
                 low=float(low_price),
                 close=float(close_price),
-                volume=float(
-                    self._read(
-                        item,
-                        "volume",
-                        0,
-                    )
-                    or 0
-                ),
+                volume=float(volume or 0),
             )
 
             prices = (
@@ -372,7 +354,6 @@ class PocketMarket:
             return candle
 
         except Exception:
-
             return None
 
     # ========================================================
@@ -390,9 +371,9 @@ class PocketMarket:
                 "Pocket Option client не подключён."
             )
 
-        # ----------------------------------------------------
-        # LIVE CANDLES
-        # ----------------------------------------------------
+        # ====================================================
+        # LIVE
+        # ====================================================
 
         live_method = getattr(
             self.client,
@@ -404,39 +385,48 @@ class PocketMarket:
 
             try:
 
+                hours = max(
+                    2.0,
+                    (limit / 60.0) + 0.5,
+                )
+
                 logger.info(
-                    "Запрашиваю LIVE свечи %s...",
+                    "LIVE candles request: symbol=%s "
+                    "period=60 hours=%.2f max_rows=%s",
                     symbol,
+                    hours,
+                    limit,
                 )
 
                 stream = live_method(
                     symbol,
                     period=60,
-                    hours=max(
-                        2.0,
-                        limit / 60.0,
-                    ),
-                    max_rows=max(
-                        limit,
-                        200,
-                    ),
+                    hours=hours,
+                    max_rows=limit,
                 )
 
-                # get_candles_live() является
-                # async generator.
-                closed, forming = (
-                    await asyncio.wait_for(
-                        anext(stream),
-                        timeout=30,
-                    )
+                # ВАЖНО:
+                # get_candles_live() — async generator.
+                first = await asyncio.wait_for(
+                    anext(stream),
+                    timeout=30,
                 )
+
+                if not first:
+                    raise RuntimeError(
+                        "LIVE stream не вернул данные."
+                    )
+
+                closed = None
+                forming = None
+
+                try:
+                    closed, forming = first
+                except Exception:
+                    closed = first
 
                 logger.info(
-                    (
-                        "LIVE свечи %s: "
-                        "closed=%s forming=%s"
-                    ),
-                    symbol,
+                    "LIVE response: closed=%s forming=%s",
                     len(closed or []),
                     bool(forming),
                 )
@@ -452,9 +442,9 @@ class PocketMarket:
                     exc,
                 )
 
-        # ----------------------------------------------------
-        # FALLBACK get_candles
-        # ----------------------------------------------------
+        # ====================================================
+        # FALLBACK
+        # ====================================================
 
         get_method = getattr(
             self.client,
@@ -464,42 +454,76 @@ class PocketMarket:
 
         if get_method is None:
             raise RuntimeError(
-                "PocketOptionAsync не содержит "
-                "get_candles()."
+                "PocketOptionAsync не содержит get_candles()."
             )
 
         try:
 
+            offset = max(
+                3600,
+                limit * 60,
+            )
+
             logger.info(
-                "Пробую fallback get_candles() для %s...",
+                "Fallback get_candles: "
+                "symbol=%s period=60 offset=%s",
                 symbol,
+                offset,
             )
 
             raw = await asyncio.wait_for(
                 get_method(
                     symbol,
                     60,
-                    max(
-                        3600,
-                        limit * 60,
-                    ),
+                    offset,
                 ),
                 timeout=30,
             )
 
-            if raw:
-                return raw
+            if not raw:
+                raise RuntimeError(
+                    "get_candles() вернул пустой результат."
+                )
 
-            raise RuntimeError(
-                "get_candles() вернул пустой результат."
-            )
+            return raw
 
         except Exception as exc:
 
+            logger.exception(
+                "get_candles(%s) failed: %s",
+                symbol,
+                exc,
+            )
+
             raise RuntimeError(
-                f"Pocket Option не смог получить "
-                f"свечи для {symbol}: {exc}"
+                "Pocket Option не смог получить свечи "
+                f"для {symbol}: {exc}"
             ) from exc
+
+    # ========================================================
+    # REQUIRED CANDLES
+    # ========================================================
+
+    @staticmethod
+    def required_1m_candles(
+        timeframe: int,
+    ) -> int:
+
+        timeframe = int(timeframe)
+
+        # Нужно минимум 60 свечей выбранного TF.
+        #
+        # Добавляем запас для неполных минут,
+        # пропусков и формирования последней свечи.
+
+        required = (
+            timeframe * 60
+        )
+
+        return max(
+            200,
+            required + 120,
+        )
 
     # ========================================================
     # PUBLIC CANDLES
@@ -508,8 +532,8 @@ class PocketMarket:
     async def candles(
         self,
         pair: str,
-        minutes: int = 5,
-        limit: int = 200,
+        minutes: int = 1,
+        limit: int | None = None,
     ) -> list[Candle]:
 
         await self.connect()
@@ -520,20 +544,29 @@ class PocketMarket:
 
         if not symbol:
 
-            # На случай если передали уже
-            # внутренний символ.
             if pair.endswith("_otc"):
                 symbol = pair
+
             else:
                 raise ValueError(
                     f"Неизвестная OTC-пара: {pair}"
                 )
 
+        minutes = max(
+            1,
+            int(minutes),
+        )
+
+        if limit is None:
+            limit = self.required_1m_candles(
+                minutes
+            )
+
         limit = max(
-            60,
+            200,
             min(
                 int(limit),
-                1000,
+                1600,
             ),
         )
 
@@ -556,6 +589,11 @@ class PocketMarket:
         )
 
         logger.info(
+            "Minutes: %s",
+            minutes,
+        )
+
+        logger.info(
             "Limit: %s",
             limit,
         )
@@ -575,7 +613,7 @@ class PocketMarket:
                 f"для {pair}."
             )
 
-        # Иногда API возвращает wrapper dict.
+        # Wrapper.
         if isinstance(raw, dict):
 
             for key in (
@@ -585,11 +623,11 @@ class PocketMarket:
             ):
 
                 if key in raw:
+
                     raw = raw[key]
                     break
 
         try:
-
             items = list(raw)
 
         except TypeError as exc:
@@ -610,7 +648,7 @@ class PocketMarket:
             if candle is not None:
                 parsed.append(candle)
 
-        # Убираем дубликаты по времени.
+        # Dedupe.
         unique = {
             candle.time: candle
             for candle in parsed
@@ -619,7 +657,16 @@ class PocketMarket:
         result = sorted(
             unique.values(),
             key=lambda candle: candle.time,
-        )[-limit:]
+        )
+
+        result = result[-limit:]
+
+        logger.info(
+            "Parsed candles: pair=%s raw=%s valid=%s",
+            pair,
+            len(items),
+            len(result),
+        )
 
         if len(result) < 60:
 
@@ -630,20 +677,25 @@ class PocketMarket:
                 f"Нужно минимум 60."
             )
 
-        # ----------------------------------------------------
-        # DATA FRESHNESS
-        # ----------------------------------------------------
+        # ====================================================
+        # FRESHNESS
+        # ====================================================
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+        last_time = result[-1].time
 
         age = (
-            datetime.now(timezone.utc)
-            - result[-1].time
+            now - last_time
         ).total_seconds()
 
         logger.info(
             "OTC %s: candles=%s last=%s age=%.1fs",
             pair,
             len(result),
-            result[-1].time.isoformat(),
+            last_time.isoformat(),
             age,
         )
 
@@ -651,7 +703,8 @@ class PocketMarket:
 
             raise RuntimeError(
                 f"OTC-данные для {pair} устарели. "
-                f"Последняя свеча {age:.0f} секунд назад."
+                f"Последняя свеча "
+                f"{age:.0f} секунд назад."
             )
 
         if age < -30:
