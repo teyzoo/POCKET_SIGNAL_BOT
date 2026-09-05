@@ -4,14 +4,17 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Float,
     Integer,
     String,
     Text,
-    select,
+    case,
     func,
+    select,
+    text,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -23,12 +26,27 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from config import config
 
 
+# ============================================================
+# DATABASE URL
+# ============================================================
+
 def normalize_database_url(url: str) -> str:
+    if not url:
+        raise RuntimeError("DATABASE_URL is empty")
+
     if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        return url.replace(
+            "postgres://",
+            "postgresql+asyncpg://",
+            1,
+        )
 
     if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
 
     if url.startswith("postgresql+psycopg2://"):
         return url.replace(
@@ -47,143 +65,273 @@ def normalize_database_url(url: str) -> str:
     return url
 
 
-DATABASE_URL = normalize_database_url(config.database_url)
+DATABASE_URL = normalize_database_url(
+    config.database_url
+)
+
+
+# ============================================================
+# ENGINE
+# ============================================================
 
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
+    pool_recycle=1800,
 )
+
 
 Session = async_sessionmaker(
     engine,
     expire_on_commit=False,
+    class_=AsyncSession,
 )
 
+
+# ============================================================
+# BASE
+# ============================================================
 
 class Base(DeclarativeBase):
     pass
 
 
+# ============================================================
+# UTC HELPER
+# ============================================================
+
+def utc_now() -> datetime:
+    """
+    Всегда возвращает timezone-aware UTC datetime.
+    """
+    return datetime.now(timezone.utc)
+
+
+# ============================================================
+# USER
+# ============================================================
+
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(
+    id: Mapped[int] = mapped_column(
         Integer,
+        primary_key=True,
+    )
+
+    telegram_id: Mapped[int] = mapped_column(
+        BigInteger,
         unique=True,
         index=True,
     )
 
-    username: Mapped[str | None] = mapped_column(String(255))
-    first_name: Mapped[str | None] = mapped_column(String(255))
+    username: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
 
-    access: Mapped[bool] = mapped_column(Boolean, default=False)
-    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    first_name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    access: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    blocked: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
 
     pair: Mapped[str] = mapped_column(
         String(32),
         default="ANY",
+        nullable=False,
     )
 
     timeframe: Mapped[int] = mapped_column(
         Integer,
         default=5,
+        nullable=False,
     )
 
     auto_signals: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
+        nullable=False,
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
     )
 
     last_seen: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
     )
 
+
+# ============================================================
+# JOIN REQUEST
+# ============================================================
 
 class JoinRequest(Base):
     __tablename__ = "join_requests"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
 
     telegram_id: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         index=True,
     )
 
-    username: Mapped[str | None] = mapped_column(String(255))
-    first_name: Mapped[str | None] = mapped_column(String(255))
+    username: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    first_name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
 
     status: Mapped[str] = mapped_column(
         String(32),
         default="pending",
+        nullable=False,
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
     )
 
+
+# ============================================================
+# SIGNAL
+# ============================================================
 
 class Signal(Base):
     __tablename__ = "signals"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
 
-    pair: Mapped[str] = mapped_column(String(32), index=True)
-    timeframe: Mapped[int] = mapped_column(Integer)
+    pair: Mapped[str] = mapped_column(
+        String(32),
+        index=True,
+    )
 
-    direction: Mapped[str] = mapped_column(String(16))
-    probability: Mapped[float] = mapped_column(Float)
-    quality: Mapped[float] = mapped_column(Float)
+    timeframe: Mapped[int] = mapped_column(
+        Integer,
+    )
 
-    entry_time: Mapped[datetime] = mapped_column(DateTime)
-    close_time: Mapped[datetime] = mapped_column(DateTime)
+    direction: Mapped[str] = mapped_column(
+        String(16),
+    )
+
+    probability: Mapped[float] = mapped_column(
+        Float,
+    )
+
+    quality: Mapped[float] = mapped_column(
+        Float,
+    )
+
+    entry_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+    )
+
+    close_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+    )
 
     status: Mapped[str] = mapped_column(
         String(16),
         default="ACTIVE",
+        nullable=False,
     )
 
-    result: Mapped[str | None] = mapped_column(String(16))
+    result: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+    )
 
-    reasons: Mapped[str | None] = mapped_column(Text)
+    reasons: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
     )
 
+
+# ============================================================
+# SETTINGS
+# ============================================================
 
 class Setting(Base):
     __tablename__ = "settings"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
 
     key: Mapped[str] = mapped_column(
         String(128),
         unique=True,
     )
 
-    value: Mapped[str] = mapped_column(Text)
+    value: Mapped[str] = mapped_column(
+        Text,
+    )
 
+
+# ============================================================
+# DATABASE INIT
+# ============================================================
 
 async def init_db():
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-
-async def get_user(telegram_id: int) -> User | None:
-    async with Session() as session:
-        result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
+        await conn.run_sync(
+            Base.metadata.create_all
         )
+
+
+# ============================================================
+# USER FUNCTIONS
+# ============================================================
+
+async def get_user(
+    telegram_id: int,
+) -> User | None:
+
+    async with Session() as session:
+
+        result = await session.execute(
+            select(User).where(
+                User.telegram_id == telegram_id
+            )
+        )
+
         return result.scalar_one_or_none()
 
 
@@ -192,26 +340,45 @@ async def ensure_user(
     username: str | None,
     first_name: str | None,
 ) -> User:
+
     async with Session() as session:
+
         result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
+            select(User).where(
+                User.telegram_id == telegram_id
+            )
         )
+
         user = result.scalar_one_or_none()
 
         if user is None:
+
             user = User(
                 telegram_id=telegram_id,
                 username=username,
                 first_name=first_name,
-                access=(telegram_id == config.owner_id),
+                access=(
+                    telegram_id == config.owner_id
+                ),
+                created_at=utc_now(),
+                last_seen=utc_now(),
             )
+
             session.add(user)
+
         else:
+
             user.username = username
             user.first_name = first_name
-            user.last_seen = datetime.now(timezone.utc)
+            user.last_seen = utc_now()
+
+            # Владелец всегда имеет доступ
+            if telegram_id == config.owner_id:
+                user.access = True
+                user.blocked = False
 
         await session.commit()
+
         return user
 
 
@@ -220,27 +387,44 @@ async def update_user(
     **kwargs: Any,
 ):
     async with Session() as session:
+
         result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
+            select(User).where(
+                User.telegram_id == telegram_id
+            )
         )
+
         user = result.scalar_one_or_none()
 
         if not user:
             return
 
         for key, value in kwargs.items():
+
             if hasattr(user, key):
-                setattr(user, key, value)
+                setattr(
+                    user,
+                    key,
+                    value,
+                )
+
+        user.last_seen = utc_now()
 
         await session.commit()
 
+
+# ============================================================
+# JOIN REQUESTS
+# ============================================================
 
 async def save_join_request(
     telegram_id: int,
     username: str | None,
     first_name: str | None,
 ):
+
     async with Session() as session:
+
         result = await session.execute(
             select(JoinRequest).where(
                 JoinRequest.telegram_id == telegram_id,
@@ -257,9 +441,12 @@ async def save_join_request(
             telegram_id=telegram_id,
             username=username,
             first_name=first_name,
+            status="pending",
+            created_at=utc_now(),
         )
 
         session.add(request)
+
         await session.commit()
 
         return request
@@ -269,26 +456,43 @@ async def set_join_request_status(
     request_id: int,
     status: str,
 ):
+
     async with Session() as session:
+
         request = await session.get(
             JoinRequest,
             request_id,
         )
 
         if request:
+
             request.status = status
+
             await session.commit()
 
 
 async def get_pending_requests():
+
     async with Session() as session:
+
         result = await session.execute(
             select(JoinRequest)
-            .where(JoinRequest.status == "pending")
-            .order_by(JoinRequest.created_at.desc())
+            .where(
+                JoinRequest.status == "pending"
+            )
+            .order_by(
+                JoinRequest.created_at.desc()
+            )
         )
-        return list(result.scalars().all())
 
+        return list(
+            result.scalars().all()
+        )
+
+
+# ============================================================
+# SIGNALS
+# ============================================================
 
 async def save_signal(
     pair: str,
@@ -300,64 +504,116 @@ async def save_signal(
     close_time: datetime,
     reasons: list[str],
 ):
+
+    # Приводим входящие даты к UTC
+    if entry_time.tzinfo is None:
+        entry_time = entry_time.replace(
+            tzinfo=timezone.utc
+        )
+    else:
+        entry_time = entry_time.astimezone(
+            timezone.utc
+        )
+
+    if close_time.tzinfo is None:
+        close_time = close_time.replace(
+            tzinfo=timezone.utc
+        )
+    else:
+        close_time = close_time.astimezone(
+            timezone.utc
+        )
+
     async with Session() as session:
+
         signal = Signal(
             pair=pair,
             timeframe=timeframe,
             direction=direction,
-            probability=probability,
-            quality=quality,
+            probability=float(probability),
+            quality=float(quality),
             entry_time=entry_time,
             close_time=close_time,
+            status="ACTIVE",
+            result=None,
             reasons=" | ".join(reasons),
+            created_at=utc_now(),
         )
 
         session.add(signal)
+
         await session.commit()
 
         return signal
 
 
-async def get_recent_signals(limit: int = 10):
+async def get_recent_signals(
+    limit: int = 10,
+):
+
     async with Session() as session:
+
         result = await session.execute(
             select(Signal)
-            .order_by(Signal.created_at.desc())
+            .order_by(
+                Signal.created_at.desc()
+            )
             .limit(limit)
         )
-        return list(result.scalars().all())
 
+        return list(
+            result.scalars().all()
+        )
+
+
+# ============================================================
+# SIGNAL STATISTICS
+# ============================================================
 
 async def get_signal_stats():
+
     async with Session() as session:
+
         total = (
             await session.execute(
-                select(func.count(Signal.id))
+                select(
+                    func.count(Signal.id)
+                )
             )
         ).scalar() or 0
 
         wins = (
             await session.execute(
-                select(func.count(Signal.id))
-                .where(Signal.result == "WIN")
+                select(
+                    func.count(Signal.id)
+                ).where(
+                    Signal.result == "WIN"
+                )
             )
         ).scalar() or 0
 
         losses = (
             await session.execute(
-                select(func.count(Signal.id))
-                .where(Signal.result == "LOSS")
+                select(
+                    func.count(Signal.id)
+                ).where(
+                    Signal.result == "LOSS"
+                )
             )
         ).scalar() or 0
 
         active = (
             await session.execute(
-                select(func.count(Signal.id))
-                .where(Signal.status == "ACTIVE")
+                select(
+                    func.count(Signal.id)
+                ).where(
+                    Signal.status == "ACTIVE"
+                )
             )
         ).scalar() or 0
 
         completed = wins + losses
+
         winrate = (
             (wins / completed) * 100
             if completed
@@ -373,18 +629,27 @@ async def get_signal_stats():
         }
 
 
+# ============================================================
+# USER STATISTICS
+# ============================================================
+
 async def get_user_stats():
+
     async with Session() as session:
+
         total = (
             await session.execute(
-                select(func.count(User.id))
+                select(
+                    func.count(User.id)
+                )
             )
         ).scalar() or 0
 
         active = (
             await session.execute(
-                select(func.count(User.id))
-                .where(
+                select(
+                    func.count(User.id)
+                ).where(
                     User.access.is_(True),
                     User.blocked.is_(False),
                 )
@@ -393,8 +658,11 @@ async def get_user_stats():
 
         blocked = (
             await session.execute(
-                select(func.count(User.id))
-                .where(User.blocked.is_(True))
+                select(
+                    func.count(User.id)
+                ).where(
+                    User.blocked.is_(True)
+                )
             )
         ).scalar() or 0
 
@@ -406,7 +674,9 @@ async def get_user_stats():
 
 
 async def get_access_users():
+
     async with Session() as session:
+
         result = await session.execute(
             select(User).where(
                 User.access.is_(True),
@@ -414,46 +684,82 @@ async def get_access_users():
             )
         )
 
-        return list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
 
+
+# ============================================================
+# PAIR STATISTICS
+# ============================================================
 
 async def get_pair_stats():
+
     async with Session() as session:
+
         result = await session.execute(
             select(
                 Signal.pair,
-                func.count(Signal.id),
-                func.sum(
-                    func.case(
-                        (Signal.result == "WIN", 1),
-                        else_=0,
-                    )
+                func.count(Signal.id).label(
+                    "total"
                 ),
                 func.sum(
-                    func.case(
-                        (Signal.result == "LOSS", 1),
+                    case(
+                        (
+                            Signal.result == "WIN",
+                            1,
+                        ),
                         else_=0,
                     )
-                ),
+                ).label("wins"),
+                func.sum(
+                    case(
+                        (
+                            Signal.result == "LOSS",
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("losses"),
             )
-            .group_by(Signal.pair)
-            .order_by(func.count(Signal.id).desc())
+            .group_by(
+                Signal.pair
+            )
+            .order_by(
+                func.count(
+                    Signal.id
+                ).desc()
+            )
         )
 
         return result.all()
 
 
-async def set_setting(key: str, value: str):
+# ============================================================
+# SETTINGS
+# ============================================================
+
+async def set_setting(
+    key: str,
+    value: str,
+):
+
     async with Session() as session:
+
         result = await session.execute(
-            select(Setting).where(Setting.key == key)
+            select(Setting).where(
+                Setting.key == key
+            )
         )
 
         setting = result.scalar_one_or_none()
 
         if setting:
+
             setting.value = value
+
         else:
+
             session.add(
                 Setting(
                     key=key,
@@ -468,9 +774,13 @@ async def get_setting(
     key: str,
     default: str | None = None,
 ):
+
     async with Session() as session:
+
         result = await session.execute(
-            select(Setting).where(Setting.key == key)
+            select(Setting).where(
+                Setting.key == key
+            )
         )
 
         setting = result.scalar_one_or_none()
@@ -481,9 +791,15 @@ async def get_setting(
         return default
 
 
-async def mark_expired_signals():
+# ============================================================
+# EXPIRED SIGNALS
+# ============================================================
+
+async def get_expired_signals():
+
     async with Session() as session:
-        now = datetime.now(timezone.utc)
+
+        now = utc_now()
 
         result = await session.execute(
             select(Signal).where(
@@ -492,9 +808,30 @@ async def mark_expired_signals():
             )
         )
 
-        signals = list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
+
+
+async def mark_expired_signals():
+
+    async with Session() as session:
+
+        now = utc_now()
+
+        result = await session.execute(
+            select(Signal).where(
+                Signal.status == "ACTIVE",
+                Signal.close_time <= now,
+            )
+        )
+
+        signals = list(
+            result.scalars().all()
+        )
 
         for signal in signals:
+
             signal.status = "EXPIRED"
 
         await session.commit()
