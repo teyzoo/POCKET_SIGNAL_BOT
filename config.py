@@ -6,11 +6,6 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-
-# ============================================================
-# ENVIRONMENT
-# ============================================================
-
 load_dotenv()
 
 
@@ -27,10 +22,7 @@ def _env(name: str, default: str = "") -> str:
     return value.strip()
 
 
-def _env_int(
-    name: str,
-    default: int = 0,
-) -> int:
+def _env_int(name: str, default: int = 0) -> int:
     value = _env(name)
 
     if not value:
@@ -42,10 +34,7 @@ def _env_int(
         return default
 
 
-def _env_float(
-    name: str,
-    default: float = 0.0,
-) -> float:
+def _env_float(name: str, default: float = 0.0) -> float:
     value = _env(name)
 
     if not value:
@@ -57,10 +46,7 @@ def _env_float(
         return default
 
 
-def _env_bool(
-    name: str,
-    default: bool = False,
-) -> bool:
+def _env_bool(name: str, default: bool = False) -> bool:
     value = _env(name)
 
     if not value:
@@ -75,64 +61,28 @@ def _env_bool(
     }
 
 
-def normalize_database_url(
-    value: str,
-) -> str:
-    """
-    Render PostgreSQL URL compatibility.
-
-    postgres://...
-        -> postgresql+asyncpg://...
-
-    postgresql://...
-        -> postgresql+asyncpg://...
-
-    postgresql+psycopg2://...
-        -> postgresql+asyncpg://...
-    """
-
+def normalize_database_url(value: str) -> str:
     value = value.strip()
 
     if not value:
         return ""
 
-    if value.startswith(
-        "postgresql+asyncpg://"
-    ):
+    prefixes = (
+        "postgresql+asyncpg://",
+        "postgresql+psycopg2://",
+        "postgresql://",
+        "postgres://",
+    )
+
+    if value.startswith("postgresql+asyncpg://"):
         return value
 
-    if value.startswith(
-        "postgresql+psycopg2://"
-    ):
-        return (
-            "postgresql+asyncpg://"
-            + value.split(
-                "://",
-                1,
-            )[1]
-        )
-
-    if value.startswith(
-        "postgresql://"
-    ):
-        return (
-            "postgresql+asyncpg://"
-            + value.split(
-                "://",
-                1,
-            )[1]
-        )
-
-    if value.startswith(
-        "postgres://"
-    ):
-        return (
-            "postgresql+asyncpg://"
-            + value.split(
-                "://",
-                1,
-            )[1]
-        )
+    for prefix in prefixes[1:]:
+        if value.startswith(prefix):
+            return (
+                "postgresql+asyncpg://"
+                + value.split("://", 1)[1]
+            )
 
     return value
 
@@ -142,91 +92,43 @@ def normalize_database_url(
 # ============================================================
 
 PAIRS = [
-    (
-        "EUR/USD OTC",
-        "EURUSD_otc",
-    ),
-    (
-        "GBP/USD OTC",
-        "GBPUSD_otc",
-    ),
-    (
-        "USD/JPY OTC",
-        "USDJPY_otc",
-    ),
-    (
-        "USD/CHF OTC",
-        "USDCHF_otc",
-    ),
-    (
-        "AUD/USD OTC",
-        "AUDUSD_otc",
-    ),
-    (
-        "USD/CAD OTC",
-        "USDCAD_otc",
-    ),
-    (
-        "NZD/USD OTC",
-        "NZDUSD_otc",
-    ),
-    (
-        "EUR/GBP OTC",
-        "EURGBP_otc",
-    ),
-    (
-        "EUR/JPY OTC",
-        "EURJPY_otc",
-    ),
-    (
-        "GBP/JPY OTC",
-        "GBPJPY_otc",
-    ),
-    (
-        "AUD/JPY OTC",
-        "AUDJPY_otc",
-    ),
-    (
-        "AUD/CAD OTC",
-        "AUDCAD_otc",
-    ),
-    (
-        "AUD/CHF OTC",
-        "AUDCHF_otc",
-    ),
-    (
-        "AUD/NZD OTC",
-        "AUDNZD_otc",
-    ),
-    (
-        "CAD/CHF OTC",
-        "CADCHF_otc",
-    ),
-    (
-        "CAD/JPY OTC",
-        "CADJPY_otc",
-    ),
-    (
-        "CHF/JPY OTC",
-        "CHFJPY_otc",
-    ),
-    (
-        "EUR/CHF OTC",
-        "EURCHF_otc",
-    ),
-    (
-        "EUR/NZD OTC",
-        "EURNZD_otc",
-    ),
-    (
-        "GBP/AUD OTC",
-        "GBPAUD_otc",
-    ),
-    (
-        "NZD/JPY OTC",
-        "NZDJPY_otc",
-    ),
+    ("EUR/USD OTC", "EURUSD_otc"),
+    ("GBP/USD OTC", "GBPUSD_otc"),
+    ("USD/JPY OTC", "USDJPY_otc"),
+    ("USD/CHF OTC", "USDCHF_otc"),
+    ("AUD/USD OTC", "AUDUSD_otc"),
+    ("USD/CAD OTC", "USDCAD_otc"),
+    ("NZD/USD OTC", "NZDUSD_otc"),
+    ("EUR/GBP OTC", "EURGBP_otc"),
+    ("EUR/JPY OTC", "EURJPY_otc"),
+    ("GBP/JPY OTC", "GBPJPY_otc"),
+    ("AUD/JPY OTC", "AUDJPY_otc"),
+    ("AUD/CAD OTC", "AUDCAD_otc"),
+    ("AUD/CHF OTC", "AUDCHF_otc"),
+    ("AUD/NZD OTC", "AUDNZD_otc"),
+    ("CAD/CHF OTC", "CADCHF_otc"),
+    ("CAD/JPY OTC", "CADJPY_otc"),
+    ("CHF/JPY OTC", "CHFJPY_otc"),
+    ("EUR/CHF OTC", "EURCHF_otc"),
+    ("EUR/NZD OTC", "EURNZD_otc"),
+    ("GBP/AUD OTC", "GBPAUD_otc"),
+    ("NZD/JPY OTC", "NZDJPY_otc"),
 ]
+
+
+# ============================================================
+# OTC SYMBOL MAP
+# ============================================================
+
+OTC_SYMBOLS = {
+    display_name: symbol
+    for display_name, symbol in PAIRS
+}
+
+OTC_DISPLAY_NAMES = {
+    symbol: display_name
+    for display_name, symbol in PAIRS
+}
 
 
 # ============================================================
@@ -245,40 +147,41 @@ TIMEFRAMES = [
 
 
 # ============================================================
-# MAIN SETTINGS
+# TELEGRAM
 # ============================================================
 
-BOT_TOKEN = _env(
-    "BOT_TOKEN"
-)
+BOT_TOKEN = _env("BOT_TOKEN")
 
-OWNER_ID_RAW = _env(
-    "OWNER_ID"
-)
+OWNER_ID_RAW = _env("OWNER_ID")
 
 OWNER_ID: Optional[int]
 
 if OWNER_ID_RAW:
     try:
-        OWNER_ID = int(
-            OWNER_ID_RAW
-        )
+        OWNER_ID = int(OWNER_ID_RAW)
     except ValueError:
         OWNER_ID = None
 else:
     OWNER_ID = None
 
 
+# ============================================================
+# DATABASE
+# ============================================================
+
 DATABASE_URL = normalize_database_url(
     _env("DATABASE_URL")
 )
 
 
+# ============================================================
+# SIGNAL SETTINGS
+# ============================================================
+
 JOIN_REQUIRED = _env_bool(
     "JOIN_REQUIRED",
     False,
 )
-
 
 MIN_SIGNAL_SCORE = max(
     0.0,
@@ -291,7 +194,6 @@ MIN_SIGNAL_SCORE = max(
     ),
 )
 
-
 MIN_PROBABILITY = max(
     0.0,
     min(
@@ -303,7 +205,6 @@ MIN_PROBABILITY = max(
     ),
 )
 
-
 SCAN_INTERVAL = max(
     10,
     _env_int(
@@ -311,7 +212,6 @@ SCAN_INTERVAL = max(
         60,
     ),
 )
-
 
 TIMEZONE = _env(
     "TIMEZONE",
@@ -323,21 +223,18 @@ TIMEZONE = _env(
 # POCKET OPTION
 # ============================================================
 
-PO_EMAIL = _env(
-    "PO_EMAIL"
-)
+PO_EMAIL = _env("PO_EMAIL")
 
-PO_PASSWORD = _env(
-    "PO_PASSWORD"
-)
+PO_PASSWORD = _env("PO_PASSWORD")
 
-PO_SSID = _env(
-    "PO_SSID"
-)
+PO_SSID = _env("PO_SSID")
 
+# ВАЖНО:
+# Если есть только email/password, бот автоматически
+# пытается получить SSID.
 PO_AUTO_LOGIN = _env_bool(
     "PO_AUTO_LOGIN",
-    False,
+    True,
 )
 
 PO_DEMO = _env_bool(
@@ -347,7 +244,7 @@ PO_DEMO = _env_bool(
 
 PO_LOGIN_URL = _env(
     "PO_LOGIN_URL",
-    "https://pocketoption.com/",
+    "https://pocketoption.com/en/login/",
 )
 
 
@@ -357,6 +254,9 @@ PO_LOGIN_URL = _env(
 
 pairs = PAIRS
 timeframes = TIMEFRAMES
+
+otc_symbols = OTC_SYMBOLS
+otc_display_names = OTC_DISPLAY_NAMES
 
 bot_token = BOT_TOKEN
 owner_id = OWNER_ID
@@ -377,28 +277,15 @@ po_auto_login = PO_AUTO_LOGIN
 po_demo = PO_DEMO
 po_login_url = PO_LOGIN_URL
 
-
 ANY_PAIR = "ANY"
 
 
 # ============================================================
-# COMPATIBILITY CONFIG OBJECT
+# CONFIG OBJECT
 # ============================================================
 
 @dataclass(frozen=True)
 class Config:
-    """
-    Compatibility object.
-
-    Старые модули проекта могут делать:
-
-        from config import config
-
-    Новые модули могут использовать:
-
-        import config
-        config.BOT_TOKEN
-    """
 
     BOT_TOKEN: str
     OWNER_ID: Optional[int]
@@ -422,79 +309,90 @@ class Config:
     PAIRS: list
     TIMEFRAMES: list
 
+    OTC_SYMBOLS: dict
+    OTC_DISPLAY_NAMES: dict
+
     ANY_PAIR: str
 
     # --------------------------------------------------------
-    # Lowercase compatibility
+    # lowercase compatibility
     # --------------------------------------------------------
 
     @property
-    def bot_token(self) -> str:
+    def bot_token(self):
         return self.BOT_TOKEN
 
     @property
-    def owner_id(self) -> Optional[int]:
+    def owner_id(self):
         return self.OWNER_ID
 
     @property
-    def database_url(self) -> str:
+    def database_url(self):
         return self.DATABASE_URL
 
     @property
-    def join_required(self) -> bool:
+    def join_required(self):
         return self.JOIN_REQUIRED
 
     @property
-    def min_signal_score(self) -> float:
+    def min_signal_score(self):
         return self.MIN_SIGNAL_SCORE
 
     @property
-    def min_probability(self) -> float:
+    def min_probability(self):
         return self.MIN_PROBABILITY
 
     @property
-    def scan_interval(self) -> int:
+    def scan_interval(self):
         return self.SCAN_INTERVAL
 
     @property
-    def timezone(self) -> str:
+    def timezone(self):
         return self.TIMEZONE
 
     @property
-    def po_email(self) -> str:
+    def po_email(self):
         return self.PO_EMAIL
 
     @property
-    def po_password(self) -> str:
+    def po_password(self):
         return self.PO_PASSWORD
 
     @property
-    def po_ssid(self) -> str:
+    def po_ssid(self):
         return self.PO_SSID
 
     @property
-    def po_auto_login(self) -> bool:
+    def po_auto_login(self):
         return self.PO_AUTO_LOGIN
 
     @property
-    def po_demo(self) -> bool:
+    def po_demo(self):
         return self.PO_DEMO
 
     @property
-    def po_login_url(self) -> str:
+    def po_login_url(self):
         return self.PO_LOGIN_URL
 
     @property
-    def pairs(self) -> list:
+    def pairs(self):
         return self.PAIRS
 
     @property
-    def timeframes(self) -> list:
+    def timeframes(self):
         return self.TIMEFRAMES
+
+    @property
+    def otc_symbols(self):
+        return self.OTC_SYMBOLS
+
+    @property
+    def otc_display_names(self):
+        return self.OTC_DISPLAY_NAMES
 
 
 # ============================================================
-# GLOBAL CONFIG INSTANCE
+# GLOBAL CONFIG
 # ============================================================
 
 config = Config(
@@ -520,6 +418,9 @@ config = Config(
     PAIRS=PAIRS,
     TIMEFRAMES=TIMEFRAMES,
 
+    OTC_SYMBOLS=OTC_SYMBOLS,
+    OTC_DISPLAY_NAMES=OTC_DISPLAY_NAMES,
+
     ANY_PAIR=ANY_PAIR,
 )
 
@@ -530,33 +431,37 @@ config = Config(
 
 if not BOT_TOKEN:
     raise RuntimeError(
-        "BOT_TOKEN is not configured. "
-        "Set BOT_TOKEN in Render Environment Variables."
+        "BOT_TOKEN is not configured in Render."
     )
-
 
 if BOT_TOKEN == ":":
     raise RuntimeError(
-        "BOT_TOKEN is invalid. "
-        "Set the real Telegram bot token "
-        "in Render Environment Variables."
+        "BOT_TOKEN is invalid."
     )
-
 
 if not DATABASE_URL:
     raise RuntimeError(
-        "DATABASE_URL is not configured. "
-        "Set the Render PostgreSQL Internal Database URL "
-        "in Environment Variables."
+        "DATABASE_URL is not configured."
     )
 
-
-if (
-    not DATABASE_URL.startswith(
-        "postgresql+asyncpg://"
-    )
+if not DATABASE_URL.startswith(
+    "postgresql+asyncpg://"
 ):
     raise RuntimeError(
-        "DATABASE_URL is not a valid PostgreSQL URL "
-        "for asyncpg."
+        "DATABASE_URL must be a PostgreSQL "
+        "URL compatible with asyncpg."
+    )
+
+
+# ============================================================
+# POCKET OPTION VALIDATION
+# ============================================================
+
+if not PO_SSID and not (
+    PO_EMAIL and PO_PASSWORD
+):
+    raise RuntimeError(
+        "Pocket Option authentication is not configured. "
+        "Set PO_SSID or PO_EMAIL + PO_PASSWORD "
+        "in Render Environment Variables."
     )
