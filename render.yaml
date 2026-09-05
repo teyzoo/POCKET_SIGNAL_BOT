@@ -8,8 +8,7 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-      python -m playwright install --with-deps chromium firefox
-      python -m playwright install chrome
+      PLAYWRIGHT_BROWSERS_PATH=0 python -m playwright install --with-deps chromium firefox
 
     startCommand: python main.py
 
@@ -18,6 +17,9 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.11
+
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"
 
       - key: BOT_TOKEN
         sync: false
