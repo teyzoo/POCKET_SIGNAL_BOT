@@ -1,14 +1,21 @@
 services:
   - type: web
-    name: pocket-signal-bot
+    name: POCKET_SIGNAL_BOT
     runtime: python
     plan: free
+    branch: main
 
-    buildCommand: pip install -r requirements.txt && playwright install chromium
+    buildCommand: |
+      pip install -r requirements.txt
+      python -m playwright install chromium
 
     startCommand: python main.py
 
+    healthCheckPath: /health
+
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.11
 
       - key: BOT_TOKEN
         sync: false
@@ -17,9 +24,22 @@ services:
         sync: false
 
       - key: DATABASE_URL
-        fromDatabase:
-          name: pocket-signal-db
-          property: connectionString
+        sync: false
+
+      - key: PO_EMAIL
+        sync: false
+
+      - key: PO_PASSWORD
+        sync: false
+
+      - key: PO_SSID
+        sync: false
+
+      - key: PO_AUTO_LOGIN
+        value: "true"
+
+      - key: PO_DEMO
+        value: "true"
 
       - key: JOIN_REQUIRED
         value: "false"
@@ -31,25 +51,7 @@ services:
         value: "75"
 
       - key: SCAN_INTERVAL
-        value: "30"
+        value: "60"
 
       - key: TIMEZONE
         value: "Europe/Moscow"
-
-      - key: PO_EMAIL
-        sync: false
-
-      - key: PO_PASSWORD
-        sync: false
-
-      - key: PO_AUTO_LOGIN
-        value: "true"
-
-      - key: PO_DEMO
-        value: "true"
-
-
-databases:
-
-  - name: pocket-signal-db
-    plan: free
