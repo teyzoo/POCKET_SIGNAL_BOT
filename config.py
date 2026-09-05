@@ -28,26 +28,70 @@ def get_float(name: str, default: float = 0.0) -> float:
         return default
 
 
+def normalize_database_url(url: str) -> str:
+    """
+    Render PostgreSQL обычно отдаёт:
+        postgresql://...
+
+    Async SQLAlchemy должен использовать:
+        postgresql+asyncpg://...
+    """
+
+    url = url.strip()
+
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+
+    if url.startswith("postgresql+psycopg2://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql+psycopg2://"):]
+
+    return url
+
+
 @dataclass
 class Config:
 
-    # Telegram
-    bot_token: str = os.getenv("BOT_TOKEN", "")
-    owner_id: int = get_int("OWNER_ID", 0)
+    # =========================
+    # TELEGRAM
+    # =========================
 
-    # Database
-    database_url: str = os.getenv(
-        "DATABASE_URL",
-        "sqlite+aiosqlite:///./pocket_signal.db",
+    bot_token: str = os.getenv(
+        "BOT_TOKEN",
+        "",
     )
 
-    # Access
+    owner_id: int = get_int(
+        "OWNER_ID",
+        0,
+    )
+
+    # =========================
+    # DATABASE
+    # =========================
+
+    database_url: str = normalize_database_url(
+        os.getenv(
+            "DATABASE_URL",
+            "sqlite+aiosqlite:///./pocket_signal.db",
+        )
+    )
+
+    # =========================
+    # ACCESS
+    # =========================
+
     join_required: bool = get_bool(
         "JOIN_REQUIRED",
         False,
     )
 
-    # Signal filters
+    # =========================
+    # SIGNAL FILTER
+    # =========================
+
     min_signal_score: float = get_float(
         "MIN_SIGNAL_SCORE",
         75.0,
@@ -58,10 +102,16 @@ class Config:
         75.0,
     )
 
-    # Scanner
-    scan_interval: int = get_int(
-        "SCAN_INTERVAL",
-        30,
+    # =========================
+    # SCANNER
+    # =========================
+
+    scan_interval: int = max(
+        10,
+        get_int(
+            "SCAN_INTERVAL",
+            30,
+        ),
     )
 
     timezone: str = os.getenv(
@@ -69,7 +119,10 @@ class Config:
         "Europe/Moscow",
     )
 
-    # Pocket Option
+    # =========================
+    # POCKET OPTION
+    # =========================
+
     po_email: str = os.getenv(
         "PO_EMAIL",
         "",
@@ -80,8 +133,6 @@ class Config:
         "",
     )
 
-    # Optional:
-    # If PO_SSID is supplied, it is used directly.
     po_ssid: str = os.getenv(
         "PO_SSID",
         "",
@@ -102,7 +153,10 @@ class Config:
         "https://pocketoption.com/en/login/",
     )
 
-    # Supported expirations
+    # =========================
+    # TIMEFRAMES
+    # =========================
+
     timeframes: list[int] = field(
         default_factory=lambda: [
             1,
@@ -115,7 +169,10 @@ class Config:
         ]
     )
 
-    # OTC display names
+    # =========================
+    # OTC PAIRS
+    # =========================
+
     pairs: list[str] = field(
         default_factory=lambda: [
             "EUR/USD OTC",
@@ -142,7 +199,10 @@ class Config:
         ]
     )
 
-    # Pocket Option OTC symbols
+    # =========================
+    # POCKET OPTION SYMBOLS
+    # =========================
+
     otc_symbols: dict[str, str] = field(
         default_factory=lambda: {
             "EUR/USD OTC": "EURUSD_otc",
