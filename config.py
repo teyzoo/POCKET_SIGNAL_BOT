@@ -4,29 +4,24 @@ import os
 from dataclasses import dataclass, field
 
 
-def env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-
-    if value is None:
-        return default
-
+def get_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name, str(default))
     return value.strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
-        "y",
     }
 
 
-def env_int(name: str, default: int = 0) -> int:
+def get_int(name: str, default: int = 0) -> int:
     try:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
 
 
-def env_float(name: str, default: float = 0.0) -> float:
+def get_float(name: str, default: float = 0.0) -> float:
     try:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
@@ -35,54 +30,38 @@ def env_float(name: str, default: float = 0.0) -> float:
 
 @dataclass
 class Config:
-    # ============================================================
-    # TELEGRAM
-    # ============================================================
 
+    # Telegram
     bot_token: str = os.getenv("BOT_TOKEN", "")
-    owner_id: int = env_int("OWNER_ID")
+    owner_id: int = get_int("OWNER_ID", 0)
 
-    # ============================================================
-    # DATABASE
-    # ============================================================
-
+    # Database
     database_url: str = os.getenv(
         "DATABASE_URL",
-        "sqlite+aiosqlite:///./signals.db",
+        "sqlite+aiosqlite:///./pocket_signal.db",
     )
 
-    # ============================================================
-    # ACCESS / SUBSCRIPTION
-    # ============================================================
-
-    join_chat_id: str = os.getenv("JOIN_CHAT_ID", "")
-
-    join_required: bool = env_bool(
+    # Access
+    join_required: bool = get_bool(
         "JOIN_REQUIRED",
         False,
     )
 
-    # ============================================================
-    # SIGNAL FILTER
-    # ============================================================
-
-    min_score: float = env_float(
+    # Signal filters
+    min_signal_score: float = get_float(
         "MIN_SIGNAL_SCORE",
         75.0,
     )
 
-    min_probability: float = env_float(
+    min_probability: float = get_float(
         "MIN_PROBABILITY",
         75.0,
     )
 
-    # ============================================================
-    # SCANNER
-    # ============================================================
-
-    scan_interval: int = env_int(
+    # Scanner
+    scan_interval: int = get_int(
         "SCAN_INTERVAL",
-        20,
+        30,
     )
 
     timezone: str = os.getenv(
@@ -90,64 +69,54 @@ class Config:
         "Europe/Moscow",
     )
 
-    # ============================================================
-    # MARKET MODE
-    # ============================================================
+    # Pocket Option
+    po_email: str = os.getenv(
+        "PO_EMAIL",
+        "",
+    )
 
-    # IMPORTANT:
-    # This bot is intended for Pocket Option OTC.
-    #
-    # It does NOT use normal Forex symbols such as:
-    # EUR/USD
-    #
-    # Internal Pocket Option symbols:
-    # EURUSD_otc
-    # GBPUSD_otc
-    # USDJPY_otc
-    #
-    market_mode: str = os.getenv(
-        "MARKET_MODE",
-        "OTC",
-    ).upper()
+    po_password: str = os.getenv(
+        "PO_PASSWORD",
+        "",
+    )
 
-    # ============================================================
-    # POCKET OPTION SESSION
-    # ============================================================
-
-    # Required for REAL Pocket Option OTC candle data.
-    #
-    # Example:
-    #
-    # PO_SSID=42["auth",{"session":"...","isDemo":1,...}]
-    #
-    # NEVER put this value directly into GitHub.
+    # Optional:
+    # If PO_SSID is supplied, it is used directly.
     po_ssid: str = os.getenv(
         "PO_SSID",
         "",
     )
 
-    # Optional Pocket Option UID.
-    po_uid: int = env_int(
-        "PO_UID",
-        0,
+    po_auto_login: bool = get_bool(
+        "PO_AUTO_LOGIN",
+        True,
     )
 
-    # Demo mode by default.
-    po_demo: bool = env_bool(
+    po_demo: bool = get_bool(
         "PO_DEMO",
         True,
     )
 
-    # ============================================================
-    # OTC PAIRS
-    # ============================================================
+    po_login_url: str = os.getenv(
+        "PO_LOGIN_URL",
+        "https://pocketoption.com/en/login/",
+    )
 
-    # These are Pocket Option-style OTC symbols.
-    #
-    # The list intentionally contains currency OTC assets only.
-    # We do not mix crypto, stocks or indices into "Any pair".
-    #
-    otc_pairs: list[str] = field(
+    # Supported expirations
+    timeframes: list[int] = field(
+        default_factory=lambda: [
+            1,
+            2,
+            3,
+            5,
+            10,
+            15,
+            20,
+        ]
+    )
+
+    # OTC display names
+    pairs: list[str] = field(
         default_factory=lambda: [
             "EUR/USD OTC",
             "GBP/USD OTC",
@@ -170,26 +139,11 @@ class Config:
             "EUR/NZD OTC",
             "GBP/AUD OTC",
             "NZD/JPY OTC",
-            "EUR/RUB OTC",
-            "USD/RUB OTC",
-            "EUR/TRY OTC",
-            "USD/MXN OTC",
-            "USD/SGD OTC",
-            "USD/THB OTC",
-            "USD/CNH OTC",
-            "USD/INR OTC",
-            "USD/BRL OTC",
-            "USD/PKR OTC",
-            "USD/COP OTC",
-            "USD/IDR OTC",
-        ],
+        ]
     )
 
-    # ============================================================
-    # POCKET OPTION SYMBOL MAP
-    # ============================================================
-
-    pocket_symbols: dict[str, str] = field(
+    # Pocket Option OTC symbols
+    otc_symbols: dict[str, str] = field(
         default_factory=lambda: {
             "EUR/USD OTC": "EURUSD_otc",
             "GBP/USD OTC": "GBPUSD_otc",
@@ -212,108 +166,14 @@ class Config:
             "EUR/NZD OTC": "EURNZD_otc",
             "GBP/AUD OTC": "GBPAUD_otc",
             "NZD/JPY OTC": "NZDJPY_otc",
-            "EUR/RUB OTC": "EURRUB_otc",
-            "USD/RUB OTC": "USDRUB_otc",
-            "EUR/TRY OTC": "EURTRY_otc",
-            "USD/MXN OTC": "USDMXN_otc",
-            "USD/SGD OTC": "USDSGD_otc",
-            "USD/THB OTC": "USDTHB_otc",
-            "USD/CNH OTC": "USDCNH_otc",
-            "USD/INR OTC": "USDINR_otc",
-            "USD/BRL OTC": "USDBRL_otc",
-            "USD/PKR OTC": "USDPKR_otc",
-            "USD/COP OTC": "USDCOP_otc",
-            "USD/IDR OTC": "USDIDR_otc",
-        },
+        }
     )
-
-    # ============================================================
-    # TIMEFRAMES
-    # ============================================================
-
-    timeframes: list[int] = field(
-        default_factory=lambda: [
-            1,
-            2,
-            3,
-            5,
-            10,
-            15,
-            20,
-        ],
-    )
-
-    # ============================================================
-    # ANALYSIS
-    # ============================================================
-
-    candle_limit: int = 200
-
-    # ============================================================
-    # VALIDATION
-    # ============================================================
-
-    @property
-    def pairs(self) -> list[str]:
-        """
-        Backwards-compatible property.
-
-        Existing main.py can continue using:
-            config.pairs
-        """
-        return list(self.otc_pairs)
-
-    def pocket_symbol(self, pair: str) -> str | None:
-        """
-        Convert Telegram/display name into Pocket Option symbol.
-        """
-        return self.pocket_symbols.get(pair)
-
-    def is_otc_pair(self, pair: str) -> bool:
-        return pair in self.otc_pairs
-
-    def validate(self) -> None:
-        if not self.bot_token:
-            raise RuntimeError(
-                "BOT_TOKEN is not configured"
-            )
-
-        if not self.owner_id:
-            raise RuntimeError(
-                "OWNER_ID is not configured"
-            )
-
-        if self.market_mode != "OTC":
-            raise RuntimeError(
-                "MARKET_MODE must be OTC"
-            )
-
-        if not self.otc_pairs:
-            raise RuntimeError(
-                "No OTC pairs configured"
-            )
-
-        for pair in self.otc_pairs:
-            if pair not in self.pocket_symbols:
-                raise RuntimeError(
-                    f"Missing Pocket Option symbol for {pair}"
-                )
-
-        if self.min_score < 0 or self.min_score > 100:
-            raise RuntimeError(
-                "MIN_SIGNAL_SCORE must be between 0 and 100"
-            )
-
-        if self.min_probability < 0 or self.min_probability > 100:
-            raise RuntimeError(
-                "MIN_PROBABILITY must be between 0 and 100"
-            )
-
-        if self.scan_interval < 1:
-            raise RuntimeError(
-                "SCAN_INTERVAL must be >= 1"
-            )
 
 
 config = Config()
-config.validate()
+
+
+if not config.bot_token:
+    raise RuntimeError(
+        "Переменная BOT_TOKEN не задана."
+    )
