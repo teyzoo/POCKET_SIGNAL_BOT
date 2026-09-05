@@ -4,55 +4,86 @@ services:
     runtime: python
     plan: free
     branch: main
+
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-      PLAYWRIGHT_BROWSERS_PATH=0 python -m playwright install --with-deps chromium firefox
+
+      mkdir -p /opt/render/project/src/.cache/ms-playwright
+
+      PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.cache/ms-playwright \
+      python -m playwright install --with-deps chromium firefox
+
+      echo "===== PLAYWRIGHT BROWSERS ====="
+      find /opt/render/project/src/.cache/ms-playwright -maxdepth 4 -type f \( -name "chrome" -o -name "firefox" \) -print
+      echo "===== END PLAYWRIGHT BROWSERS ====="
+
     startCommand: python main.py
+
     healthCheckPath: /health
+
     envVars:
       - key: PYTHON_VERSION
-        value: 3.13.11
+        value: "3.13.11"
+
       # ======================================================
       # PLAYWRIGHT
       # ======================================================
+
       - key: PLAYWRIGHT_BROWSERS_PATH
-        value: "0"
+        value: "/opt/render/project/src/.cache/ms-playwright"
+
       # ======================================================
       # TELEGRAM
       # ======================================================
+
       - key: BOT_TOKEN
         sync: false
+
       - key: OWNER_ID
         sync: false
+
       # ======================================================
       # DATABASE
       # ======================================================
+
       - key: DATABASE_URL
         sync: false
+
       # ======================================================
       # POCKET OPTION
       # ======================================================
+
       - key: PO_EMAIL
         sync: false
+
       - key: PO_PASSWORD
         sync: false
+
       - key: PO_SSID
         sync: false
+
       - key: PO_AUTO_LOGIN
         value: "true"
+
       - key: PO_DEMO
         value: "true"
+
       # ======================================================
       # BOT
       # ======================================================
+
       - key: JOIN_REQUIRED
         value: "false"
+
       - key: MIN_SIGNAL_SCORE
         value: "75"
+
       - key: MIN_PROBABILITY
         value: "75"
+
       - key: SCAN_INTERVAL
         value: "60"
+
       - key: TIMEZONE
         value: "Europe/Moscow"
