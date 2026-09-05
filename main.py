@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from contextlib import suppress
 from datetime import datetime, timezone
 
-from aiogram import (
-    Bot,
-    Dispatcher,
-    F,
-)
+import uvicorn
+from fastapi import FastAPI
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -20,7 +20,6 @@ from aiogram.types import (
 
 from config import config
 from database import (
-    Session,
     User,
     ensure_user,
     get_access_users,
@@ -31,6 +30,7 @@ from database import (
     get_user,
     get_user_stats,
     init_db,
+    mark_expired_signals,
     save_join_request,
     save_signal,
     set_join_request_status,
@@ -40,18 +40,68 @@ from market import market
 from signals import engine
 
 
+# ============================================================
+# LOGGING
+# ============================================================
+
 logging.basicConfig(
     level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
+
+logger = logging.getLogger("pocket_signal_bot")
+
+
+# ============================================================
+# FASTAPI / RENDER HEALTH SERVER
+# ============================================================
+
+app = FastAPI(
+    title="Pocket Signal Bot",
+    version="1.0.0",
+)
+
+
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "service": "POCKET SIGNAL BOT",
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "service": "POCKET SIGNAL BOT",
+        "telegram": "running",
+    }
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
 
 bot = Bot(token=config.bot_token)
 dp = Dispatcher()
 
+
+# ============================================================
+# GLOBAL STATE
+# ============================================================
+
 AUTO_SIGNALS = True
+
 LAST_SIGNAL_KEYS: set[str] = set()
 
 
+# ============================================================
+# KEYBOARDS
+# ============================================================
+
 def main_keyboard(user: User):
+
     access_text = (
         "🟢 Доступ открыт"
         if user.access
@@ -103,6 +153,7 @@ def main_keyboard(user: User):
 
 
 def owner_keyboard():
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -145,18 +196,24 @@ def owner_keyboard():
     )
 
 
+# ============================================================
+# SIGNAL MESSAGE
+# ============================================================
+
 async def send_signal_to_user(
     telegram_id: int,
     result,
 ):
+
     direction_icon = (
-        "🟢" if result.direction == "UP"
+        "🟢"
+        if result.direction == "UP"
         else "🔴"
     )
 
     text = (
         "━━━━━━━━━━━━━━━━━━\n"
-        "🚨 СИЛЬНЫЙ СИГНАЛ\n"
+        "🚨 <b>СИЛЬНЫЙ СИГНАЛ</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"💱 Пара: <b>{result.pair}</b>\n"
         f"📌 Направление: "
@@ -171,7 +228,7 @@ async def send_signal_to_user(
         f"<b>{result.entry_time.strftime('%H:%M:%S')}</b>\n"
         f"🕐 Закрытие: "
         f"<b>{result.close_time.strftime('%H:%M:%S')}</b>\n\n"
-        "📊 Подтверждения:\n"
+        "📊 <b>Подтверждения:</b>\n"
     )
 
     for reason in result.reasons:
@@ -183,25 +240,34 @@ async def send_signal_to_user(
     )
 
     try:
+
         await bot.send_message(
             telegram_id,
             text,
         )
+
         return True
 
     except Exception as exc:
-        logging.warning(
+
+        logger.warning(
             "Cannot send signal to %s: %s",
             telegram_id,
             exc,
         )
+
         return False
 
+
+# ============================================================
+# SIGNAL ANALYSIS
+# ============================================================
 
 async def get_signal_for(
     pair: str,
     timeframe: int,
 ):
+
     candles = await market.candles(
         pair,
         minutes=timeframe,
@@ -218,7 +284,12 @@ async def get_signal_for(
     )
 
 
+# ============================================================
+# AUTOMATIC SCANNER
+# ============================================================
+
 async def scan_once():
+
     global LAST_SIGNAL_KEYS
 
     if not AUTO_SIGNALS:
@@ -226,9 +297,13 @@ async def scan_once():
 
     users = await get_access_users()
 
+    if not users:
+        return
+
     requested: set[tuple[str, int]] = set()
 
     for user in users:
+
         pair_list = (
             config.pairs
             if user.pair == "ANY"
@@ -236,15 +311,32 @@ async def scan_once():
         )
 
         for pair in pair_list:
+
             requested.add(
-                (pair, user.timeframe)
+                (
+                    pair,
+                    user.timeframe,
+                )
             )
 
     for pair, timeframe in requested:
-        result = await get_signal_for(
-            pair,
-            timeframe,
-        )
+
+        try:
+
+            result = await get_signal_for(
+                pair,
+                timeframe,
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Signal analysis error: %s %s",
+                pair,
+                timeframe,
+            )
+
+            continue
 
         if not result:
             continue
@@ -259,14 +351,17 @@ async def scan_once():
         if minute_key in LAST_SIGNAL_KEYS:
             continue
 
-        LAST_SIGNAL_KEYS.add(minute_key)
+        LAST_SIGNAL_KEYS.add(
+            minute_key
+        )
 
         if len(LAST_SIGNAL_KEYS) > 1000:
+
             LAST_SIGNAL_KEYS = set(
                 list(LAST_SIGNAL_KEYS)[-500:]
             )
 
-        signal = await save_signal(
+        await save_signal(
             pair=result.pair,
             timeframe=result.timeframe,
             direction=result.direction,
@@ -278,10 +373,14 @@ async def scan_once():
         )
 
         for user in users:
+
             if not user.auto_signals:
                 continue
 
-            if user.pair != "ANY" and user.pair != pair:
+            if (
+                user.pair != "ANY"
+                and user.pair != pair
+            ):
                 continue
 
             if user.timeframe != timeframe:
@@ -294,40 +393,63 @@ async def scan_once():
 
 
 async def scheduler_loop():
+
     while True:
+
         try:
+
             await scan_once()
 
+        except asyncio.CancelledError:
+            raise
+
         except Exception:
-            logging.exception(
+
+            logger.exception(
                 "Scanner error"
             )
 
         await asyncio.sleep(
-            max(10, config.scan_interval)
+            max(
+                10,
+                config.scan_interval,
+            )
         )
 
 
+# ============================================================
+# RESULT LOOP
+# ============================================================
+
 async def result_loop():
+
     while True:
+
         try:
-            # В этой версии закрытые сигналы помечаются
-            # как EXPIRED. Реальное определение WIN/LOSS
-            # можно расширять отдельным провайдером котировок.
-            from database import mark_expired_signals
 
             await mark_expired_signals()
 
+        except asyncio.CancelledError:
+            raise
+
         except Exception:
-            logging.exception(
+
+            logger.exception(
                 "Result loop error"
             )
 
         await asyncio.sleep(30)
 
 
+# ============================================================
+# START
+# ============================================================
+
 @dp.message(CommandStart())
-async def start_handler(message: Message):
+async def start_handler(
+    message: Message,
+):
+
     user = await ensure_user(
         message.from_user.id,
         message.from_user.username,
@@ -335,9 +457,11 @@ async def start_handler(message: Message):
     )
 
     if user.blocked:
+
         await message.answer(
             "🚫 Ваш доступ заблокирован."
         )
+
         return
 
     text = (
@@ -350,7 +474,11 @@ async def start_handler(message: Message):
         f"<b>{'ON' if user.auto_signals else 'OFF'}</b>\n\n"
     )
 
-    if not user.access and config.join_required:
+    if (
+        not user.access
+        and config.join_required
+    ):
+
         text += (
             "🔐 Для получения сигналов сначала "
             "подай заявку на вступление."
@@ -362,8 +490,15 @@ async def start_handler(message: Message):
     )
 
 
+# ============================================================
+# OWNER
+# ============================================================
+
 @dp.message(Command("owner"))
-async def owner_handler(message: Message):
+async def owner_handler(
+    message: Message,
+):
+
     if message.from_user.id != config.owner_id:
         return
 
@@ -373,22 +508,38 @@ async def owner_handler(message: Message):
     )
 
 
+# ============================================================
+# MANUAL SIGNAL
+# ============================================================
+
 @dp.callback_query(F.data == "signal")
-async def manual_signal(call: CallbackQuery):
-    user = await get_user(call.from_user.id)
+async def manual_signal(
+    call: CallbackQuery,
+):
+
+    user = await get_user(
+        call.from_user.id
+    )
 
     if not user or user.blocked:
+
         await call.answer(
             "Доступ заблокирован.",
             show_alert=True,
         )
+
         return
 
-    if config.join_required and not user.access:
+    if (
+        config.join_required
+        and not user.access
+    ):
+
         await call.answer(
             "Сначала получи доступ.",
             show_alert=True,
         )
+
         return
 
     await call.answer(
@@ -407,6 +558,7 @@ async def manual_signal(call: CallbackQuery):
     )
 
     if not result:
+
         await call.message.answer(
             "⚪ <b>Сильного сигнала сейчас нет.</b>\n\n"
             f"💱 {pair}\n"
@@ -414,6 +566,7 @@ async def manual_signal(call: CallbackQuery):
             "Я не буду выдавать слабый сигнал "
             "только ради того, чтобы что-то показать."
         )
+
         return
 
     await send_signal_to_user(
@@ -422,9 +575,18 @@ async def manual_signal(call: CallbackQuery):
     )
 
 
+# ============================================================
+# AUTO TOGGLE
+# ============================================================
+
 @dp.callback_query(F.data == "toggle_auto")
-async def toggle_auto(call: CallbackQuery):
-    user = await get_user(call.from_user.id)
+async def toggle_auto(
+    call: CallbackQuery,
+):
+
+    user = await get_user(
+        call.from_user.id
+    )
 
     if not user:
         return
@@ -438,30 +600,44 @@ async def toggle_auto(call: CallbackQuery):
 
     user.auto_signals = new_value
 
-    await call.message.edit_reply_markup(
-        reply_markup=main_keyboard(user)
-    )
+    with suppress(Exception):
+
+        await call.message.edit_reply_markup(
+            reply_markup=main_keyboard(user)
+        )
 
     await call.answer(
         "Автосигналы "
-        + ("включены" if new_value else "выключены")
+        + (
+            "включены"
+            if new_value
+            else "выключены"
+        )
     )
 
 
-@dp.callback_query(F.data == "pairs")
-async def pairs_menu(call: CallbackQuery):
-    buttons = []
+# ============================================================
+# PAIRS
+# ============================================================
 
-    buttons.append([
-        InlineKeyboardButton(
-            text="🌐 Любая пара",
-            callback_data="pair_ANY",
-        )
-    ])
+@dp.callback_query(F.data == "pairs")
+async def pairs_menu(
+    call: CallbackQuery,
+):
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="🌐 Любая пара",
+                callback_data="pair_ANY",
+            )
+        ]
+    ]
 
     row = []
 
     for pair in config.pairs:
+
         row.append(
             InlineKeyboardButton(
                 text=pair,
@@ -470,6 +646,7 @@ async def pairs_menu(call: CallbackQuery):
         )
 
         if len(row) == 2:
+
             buttons.append(row)
             row = []
 
@@ -487,7 +664,10 @@ async def pairs_menu(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("pair_"))
-async def choose_pair(call: CallbackQuery):
+async def choose_pair(
+    call: CallbackQuery,
+):
+
     pair = call.data.replace(
         "pair_",
         "",
@@ -504,13 +684,21 @@ async def choose_pair(call: CallbackQuery):
     )
 
 
+# ============================================================
+# TIMEFRAMES
+# ============================================================
+
 @dp.callback_query(F.data == "timeframes")
-async def timeframes_menu(call: CallbackQuery):
+async def timeframes_menu(
+    call: CallbackQuery,
+):
+
     buttons = []
 
     row = []
 
     for value in config.timeframes:
+
         row.append(
             InlineKeyboardButton(
                 text=f"{value} мин.",
@@ -519,18 +707,21 @@ async def timeframes_menu(call: CallbackQuery):
         )
 
         if len(row) == 3:
+
             buttons.append(row)
             row = []
 
     if row:
         buttons.append(row)
 
-    buttons.append([
-        InlineKeyboardButton(
-            text="♾ Любое время",
-            callback_data="time_ANY",
-        )
-    ])
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="♾ Любое время",
+                callback_data="time_ANY",
+            )
+        ]
+    )
 
     await call.message.answer(
         "⏱ <b>Выбери время экспирации:</b>",
@@ -543,7 +734,10 @@ async def timeframes_menu(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("time_"))
-async def choose_time(call: CallbackQuery):
+async def choose_time(
+    call: CallbackQuery,
+):
+
     value = call.data.replace(
         "time_",
         "",
@@ -551,8 +745,7 @@ async def choose_time(call: CallbackQuery):
     )
 
     if value == "ANY":
-        # Для автоматического режима
-        # выбираем наиболее универсальные 5 минут.
+
         value = 5
 
     await update_user(
@@ -565,9 +758,21 @@ async def choose_time(call: CallbackQuery):
     )
 
 
+# ============================================================
+# SETTINGS
+# ============================================================
+
 @dp.callback_query(F.data == "settings")
-async def settings(call: CallbackQuery):
-    user = await get_user(call.from_user.id)
+async def settings(
+    call: CallbackQuery,
+):
+
+    user = await get_user(
+        call.from_user.id
+    )
+
+    if not user:
+        return
 
     await call.message.answer(
         "⚙️ <b>Текущие настройки</b>\n\n"
@@ -582,37 +787,58 @@ async def settings(call: CallbackQuery):
     await call.answer()
 
 
+# ============================================================
+# ACCESS
+# ============================================================
+
 @dp.callback_query(F.data == "access")
-async def access(call: CallbackQuery):
-    user = await get_user(call.from_user.id)
+async def access(
+    call: CallbackQuery,
+):
+
+    user = await get_user(
+        call.from_user.id
+    )
+
+    if not user:
+        return
 
     if user.access:
+
         await call.answer(
             "Доступ уже открыт.",
             show_alert=True,
         )
+
         return
 
     if not config.join_chat_id:
-        await call.answer(
-            "JOIN_CHAT_ID не настроен.",
-            show_alert=True,
+
+        await call.message.answer(
+            "ℹ️ Обязательная подписка сейчас "
+            "не настроена.\n\n"
+            "Владелец может открыть доступ "
+            "через настройки."
         )
+
+        await call.answer()
+
         return
 
     try:
+
         invite = await bot.create_chat_invite_link(
             chat_id=config.join_chat_id,
-            name="Signal Bot",
             creates_join_request=True,
+            name="Pocket Signal Access",
         )
 
         await call.message.answer(
             "🔐 <b>Получение доступа</b>\n\n"
             "1️⃣ Нажми кнопку ниже.\n"
             "2️⃣ Отправь заявку на вступление.\n"
-            "3️⃣ После одобрения доступ к сигналам "
-            "будет открыт автоматически.",
+            "3️⃣ После одобрения получишь доступ "
+            "к сигналам.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
@@ -626,379 +852,433 @@ async def access(call: CallbackQuery):
         )
 
     except Exception as exc:
-        logging.exception(
-            "Invite creation error"
+
+        logger.exception(
+            "Cannot create invite link: %s",
+            exc,
         )
 
-        await call.answer(
-            "Не удалось создать ссылку. "
-            "Проверь права бота.",
-            show_alert=True,
+        await call.message.answer(
+            "❌ Не удалось создать ссылку.\n\n"
+            "Проверь, что бот является "
+            "администратором канала/группы "
+            "и имеет право приглашать пользователей."
         )
 
+    await call.answer()
+
+
+# ============================================================
+# JOIN REQUEST
+# ============================================================
 
 @dp.chat_join_request()
 async def join_request_handler(
     request: ChatJoinRequest,
 ):
+
+    if (
+        config.join_chat_id
+        and request.chat.id != config.join_chat_id
+    ):
+        return
+
     user = request.from_user
 
-    await ensure_user(
-        user.id,
-        user.username,
-        user.first_name,
-    )
-
     saved = await save_join_request(
-        user.id,
-        user.username,
-        user.first_name,
-    )
-
-    if config.join_chat_id:
-        if str(request.chat.id) != str(
-            config.join_chat_id
-        ):
-            return
-
-    username = (
-        f"@{user.username}"
-        if user.username
-        else "нет username"
-    )
-
-    await bot.send_message(
-        config.owner_id,
-        "🔐 <b>НОВАЯ ЗАЯВКА</b>\n\n"
-        f"👤 {user.first_name}\n"
-        f"🔗 {username}\n"
-        f"🆔 <code>{user.id}</code>\n\n"
-        "Выбери действие:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="✅ Одобрить",
-                        callback_data=f"approve_{saved.id}",
-                    ),
-                    InlineKeyboardButton(
-                        text="❌ Отклонить",
-                        callback_data=f"decline_{saved.id}",
-                    ),
-                ]
-            ]
-        ),
-    )
-
-
-@dp.callback_query(F.data.startswith("approve_"))
-async def approve_request(call: CallbackQuery):
-    if call.from_user.id != config.owner_id:
-        return
-
-    request_id = int(
-        call.data.replace(
-            "approve_",
-            "",
-            1,
-        )
-    )
-
-    pending = await get_pending_requests()
-
-    request = next(
-        (
-            x for x in pending
-            if x.id == request_id
-        ),
-        None,
-    )
-
-    if not request:
-        await call.answer(
-            "Заявка уже обработана.",
-            show_alert=True,
-        )
-        return
-
-    if config.join_chat_id:
-        try:
-            await bot.approve_chat_join_request(
-                chat_id=config.join_chat_id,
-                user_id=request.telegram_id,
-            )
-        except Exception as exc:
-            logging.exception(
-                "Approve error: %s",
-                exc,
-            )
-
-    await update_user(
-        request.telegram_id,
-        access=True,
-    )
-
-    await set_join_request_status(
-        request.id,
-        "approved",
+        telegram_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
     )
 
     try:
+
         await bot.send_message(
-            request.telegram_id,
-            "✅ <b>Доступ одобрен!</b>\n\n"
-            "Теперь тебе доступны сигналы.",
+            config.owner_id,
+            "🔔 <b>НОВАЯ ЗАЯВКА</b>\n\n"
+            f"👤 Имя: <b>{user.first_name}</b>\n"
+            f"🔹 Username: "
+            f"<b>@{user.username or 'нет'}</b>\n"
+            f"🆔 ID: <code>{user.id}</code>\n"
+            f"📅 Время: "
+            f"<b>{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}</b>\n\n"
+            f"📝 Заявка ID: <code>{saved.id}</code>",
         )
+
     except Exception:
-        pass
 
-    await call.message.edit_text(
-        "✅ <b>Заявка одобрена.</b>\n\n"
-        f"🆔 {request.telegram_id}\n"
-        "🔓 Доступ к сигналам открыт."
-    )
-
-    await call.answer("Одобрено")
+        logger.exception(
+            "Cannot notify owner about join request"
+        )
 
 
-@dp.callback_query(F.data.startswith("decline_"))
-async def decline_request(call: CallbackQuery):
+# ============================================================
+# OWNER USERS
+# ============================================================
+
+@dp.callback_query(F.data == "owner_users")
+async def owner_users(
+    call: CallbackQuery,
+):
+
     if call.from_user.id != config.owner_id:
         return
 
-    request_id = int(
-        call.data.replace(
-            "decline_",
-            "",
-            1,
-        )
+    stats = await get_user_stats()
+
+    await call.message.answer(
+        "👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n"
+        f"👤 Всего: <b>{stats['total']}</b>\n"
+        f"🟢 С доступом: <b>{stats['active']}</b>\n"
+        f"🚫 Заблокировано: <b>{stats['blocked']}</b>"
     )
-
-    pending = await get_pending_requests()
-
-    request = next(
-        (
-            x for x in pending
-            if x.id == request_id
-        ),
-        None,
-    )
-
-    if not request:
-        await call.answer(
-            "Заявка уже обработана.",
-            show_alert=True,
-        )
-        return
-
-    if config.join_chat_id:
-        try:
-            await bot.decline_chat_join_request(
-                chat_id=config.join_chat_id,
-                user_id=request.telegram_id,
-            )
-        except Exception:
-            logging.exception(
-                "Decline error"
-            )
-
-    await set_join_request_status(
-        request.id,
-        "declined",
-    )
-
-    await call.message.edit_text(
-        "❌ <b>Заявка отклонена.</b>\n\n"
-        f"🆔 {request.telegram_id}"
-    )
-
-    await call.answer("Отклонено")
-
-
-@dp.callback_query(F.data.startswith("owner_"))
-async def owner_callbacks(call: CallbackQuery):
-    if call.from_user.id != config.owner_id:
-        return
-
-    action = call.data.replace(
-        "owner_",
-        "",
-        1,
-    )
-
-    if action == "users":
-        stats = await get_user_stats()
-
-        await call.message.answer(
-            "👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n"
-            f"Всего: <b>{stats['total']}</b>\n"
-            f"Активных: <b>{stats['active']}</b>\n"
-            f"Заблокировано: <b>{stats['blocked']}</b>"
-        )
-
-    elif action == "stats":
-        stats = await get_signal_stats()
-
-        await call.message.answer(
-            "📊 <b>СТАТИСТИКА</b>\n\n"
-            f"Всего сигналов: <b>{stats['total']}</b>\n"
-            f"🟢 WIN: <b>{stats['wins']}</b>\n"
-            f"🔴 LOSS: <b>{stats['losses']}</b>\n"
-            f"🟡 ACTIVE: <b>{stats['active']}</b>\n"
-            f"📈 WINRATE: <b>{stats['winrate']:.2f}%</b>"
-        )
-
-    elif action == "signals":
-        stats = await get_signal_stats()
-
-        await call.message.answer(
-            "📡 <b>СИГНАЛЫ</b>\n\n"
-            f"Всего: {stats['total']}\n"
-            f"Активных: {stats['active']}\n"
-            f"WIN: {stats['wins']}\n"
-            f"LOSS: {stats['losses']}\n"
-            f"WINRATE: {stats['winrate']:.2f}%"
-        )
-
-    elif action == "requests":
-        requests = await get_pending_requests()
-
-        if not requests:
-            await call.message.answer(
-                "🔐 Нет ожидающих заявок."
-            )
-            return
-
-        for request in requests[:20]:
-            username = (
-                f"@{request.username}"
-                if request.username
-                else "нет username"
-            )
-
-            await call.message.answer(
-                "🔐 <b>ЗАЯВКА</b>\n\n"
-                f"👤 {request.first_name}\n"
-                f"🔗 {username}\n"
-                f"🆔 <code>{request.telegram_id}</code>\n"
-                f"📅 {request.created_at:%d.%m.%Y %H:%M}",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="✅ Одобрить",
-                                callback_data=f"approve_{request.id}",
-                            ),
-                            InlineKeyboardButton(
-                                text="❌ Отклонить",
-                                callback_data=f"decline_{request.id}",
-                            ),
-                        ]
-                    ]
-                ),
-            )
-
-    elif action == "auto":
-        global AUTO_SIGNALS
-
-        AUTO_SIGNALS = not AUTO_SIGNALS
-
-        await call.message.answer(
-            "▶️ Автосигналы: "
-            + (
-                "<b>ON</b>"
-                if AUTO_SIGNALS
-                else "<b>OFF</b>"
-            )
-        )
-
-    elif action == "recent":
-        signals = await get_recent_signals(10)
-
-        if not signals:
-            await call.message.answer(
-                "Сигналов пока нет."
-            )
-            return
-
-        text = "🧹 <b>ПОСЛЕДНИЕ СИГНАЛЫ</b>\n\n"
-
-        for signal in signals:
-            text += (
-                f"{'🟢' if signal.direction == 'UP' else '🔴'} "
-                f"{signal.pair} "
-                f"{signal.direction} "
-                f"{signal.timeframe}m | "
-                f"{signal.quality:.0f}% | "
-                f"{signal.status}\n"
-            )
-
-        await call.message.answer(text)
-
-    elif action == "pairs":
-        stats = await get_pair_stats()
-
-        if not stats:
-            await call.message.answer(
-                "Статистики по парам пока нет."
-            )
-            return
-
-        text = "📊 <b>СТАТИСТИКА ПО ПАРАМ</b>\n\n"
-
-        for pair, total, wins, losses in stats:
-            wins = wins or 0
-            losses = losses or 0
-
-            completed = wins + losses
-
-            rate = (
-                wins / completed * 100
-                if completed
-                else 0
-            )
-
-            text += (
-                f"💱 <b>{pair}</b>\n"
-                f"Сигналов: {total}\n"
-                f"WIN: {wins} | LOSS: {losses}\n"
-                f"WINRATE: {rate:.1f}%\n\n"
-            )
-
-        await call.message.answer(text)
 
     await call.answer()
 
 
-async def main():
-    await init_db()
-    await market.start()
+# ============================================================
+# OWNER STATS
+# ============================================================
 
-    asyncio.create_task(
-        scheduler_loop()
+@dp.callback_query(F.data == "owner_stats")
+async def owner_stats(
+    call: CallbackQuery,
+):
+
+    if call.from_user.id != config.owner_id:
+        return
+
+    users = await get_user_stats()
+    signals = await get_signal_stats()
+
+    await call.message.answer(
+        "📊 <b>СТАТИСТИКА</b>\n\n"
+        "👥 Пользователи\n"
+        f"• Всего: <b>{users['total']}</b>\n"
+        f"• Активных: <b>{users['active']}</b>\n"
+        f"• Заблокировано: <b>{users['blocked']}</b>\n\n"
+        "📡 Сигналы\n"
+        f"• Всего: <b>{signals['total']}</b>\n"
+        f"• WIN: <b>{signals['wins']}</b>\n"
+        f"• LOSS: <b>{signals['losses']}</b>\n"
+        f"• ACTIVE: <b>{signals['active']}</b>\n"
+        f"• WINRATE: <b>{signals['winrate']:.2f}%</b>"
     )
 
-    asyncio.create_task(
-        result_loop()
+    await call.answer()
+
+
+# ============================================================
+# OWNER SIGNALS
+# ============================================================
+
+@dp.callback_query(F.data == "owner_signals")
+async def owner_signals(
+    call: CallbackQuery,
+):
+
+    if call.from_user.id != config.owner_id:
+        return
+
+    stats = await get_signal_stats()
+
+    await call.message.answer(
+        "📡 <b>СИГНАЛЫ</b>\n\n"
+        f"Всего: <b>{stats['total']}</b>\n"
+        f"WIN: <b>{stats['wins']}</b>\n"
+        f"LOSS: <b>{stats['losses']}</b>\n"
+        f"ACTIVE: <b>{stats['active']}</b>\n"
+        f"WINRATE: <b>{stats['winrate']:.2f}%</b>"
     )
 
-    logging.info(
-        "POCKET SIGNAL BOT started"
-    )
+    await call.answer()
 
-    try:
-        await dp.start_polling(
-            bot,
-            allowed_updates=[
-                "message",
-                "callback_query",
-                "chat_join_request",
-            ],
+
+# ============================================================
+# OWNER REQUESTS
+# ============================================================
+
+@dp.callback_query(F.data == "owner_requests")
+async def owner_requests(
+    call: CallbackQuery,
+):
+
+    if call.from_user.id != config.owner_id:
+        return
+
+    requests = await get_pending_requests()
+
+    if not requests:
+
+        await call.message.answer(
+            "🔐 <b>Заявок нет.</b>"
         )
-    finally:
-        await market.close()
+
+        await call.answer()
+
+        return
+
+    text = "🔐 <b>ОЖИДАЮЩИЕ ЗАЯВКИ</b>\n\n"
+
+    for request in requests[:20]:
+
+        text += (
+            f"🆔 <b>{request.id}</b>\n"
+            f"👤 {request.first_name or 'Без имени'}\n"
+            f"🔹 @{request.username or 'нет'}\n"
+            f"Telegram ID: <code>{request.telegram_id}</code>\n"
+            f"📅 {request.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+        )
+
+    await call.message.answer(text)
+
+    await call.answer()
+
+
+# ============================================================
+# OWNER AUTO
+# ============================================================
+
+@dp.callback_query(F.data == "owner_auto")
+async def owner_auto(
+    call: CallbackQuery,
+):
+
+    global AUTO_SIGNALS
+
+    if call.from_user.id != config.owner_id:
+        return
+
+    AUTO_SIGNALS = not AUTO_SIGNALS
+
+    await call.message.answer(
+        "📡 Автосигналы: "
+        f"<b>{'ON' if AUTO_SIGNALS else 'OFF'}</b>"
+    )
+
+    await call.answer()
+
+
+# ============================================================
+# OWNER RECENT
+# ============================================================
+
+@dp.callback_query(F.data == "owner_recent")
+async def owner_recent(
+    call: CallbackQuery,
+):
+
+    if call.from_user.id != config.owner_id:
+        return
+
+    signals = await get_recent_signals(10)
+
+    if not signals:
+
+        await call.message.answer(
+            "🧹 Сигналов пока нет."
+        )
+
+        await call.answer()
+
+        return
+
+    text = "🧹 <b>ПОСЛЕДНИЕ СИГНАЛЫ</b>\n\n"
+
+    for signal in signals:
+
+        result = signal.result or "ACTIVE"
+
+        text += (
+            f"#{signal.id} "
+            f"<b>{signal.pair}</b> "
+            f"{signal.direction}\n"
+            f"⏱ {signal.timeframe} мин. | "
+            f"🎯 {signal.probability:.1f}% | "
+            f"⭐ {signal.quality:.1f}\n"
+            f"📊 {result}\n\n"
+        )
+
+    await call.message.answer(text)
+
+    await call.answer()
+
+
+# ============================================================
+# OWNER PAIRS
+# ============================================================
+
+@dp.callback_query(F.data == "owner_pairs")
+async def owner_pairs(
+    call: CallbackQuery,
+):
+
+    if call.from_user.id != config.owner_id:
+        return
+
+    rows = await get_pair_stats()
+
+    if not rows:
+
+        await call.message.answer(
+            "📊 Статистика по парам пока пустая."
+        )
+
+        await call.answer()
+
+        return
+
+    text = "📊 <b>СТАТИСТИКА ПО ПАРАМ</b>\n\n"
+
+    for pair, total, wins, losses in rows:
+
+        wins = wins or 0
+        losses = losses or 0
+
+        completed = wins + losses
+
+        winrate = (
+            wins / completed * 100
+            if completed
+            else 0
+        )
+
+        text += (
+            f"💱 <b>{pair}</b>\n"
+            f"Всего: {total}\n"
+            f"WIN: {wins}\n"
+            f"LOSS: {losses}\n"
+            f"WINRATE: {winrate:.2f}%\n\n"
+        )
+
+    await call.message.answer(text)
+
+    await call.answer()
+
+
+# ============================================================
+# SHUTDOWN
+# ============================================================
+
+async def shutdown():
+
+    logger.info(
+        "Shutting down Pocket Signal Bot..."
+    )
+
+    with suppress(Exception):
         await bot.session.close()
 
 
+# ============================================================
+# FASTAPI SERVER
+# ============================================================
+
+async def run_http_server():
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000",
+        )
+    )
+
+    server_config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+        access_log=False,
+    )
+
+    server = uvicorn.Server(
+        server_config
+    )
+
+    logger.info(
+        "HTTP health server starting on 0.0.0.0:%s",
+        port,
+    )
+
+    await server.serve()
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+
+    logger.info(
+        "POCKET SIGNAL BOT starting..."
+    )
+
+    await init_db()
+
+    logger.info(
+        "Database initialized"
+    )
+
+    http_task = asyncio.create_task(
+        run_http_server()
+    )
+
+    scanner_task = asyncio.create_task(
+        scheduler_loop()
+    )
+
+    result_task = asyncio.create_task(
+        result_loop()
+    )
+
+    try:
+
+        logger.info(
+            "Starting Telegram polling..."
+        )
+
+        await dp.start_polling(
+            bot
+        )
+
+    finally:
+
+        for task in (
+            http_task,
+            scanner_task,
+            result_task,
+        ):
+
+            task.cancel()
+
+        for task in (
+            http_task,
+            scanner_task,
+            result_task,
+        ):
+
+            with suppress(
+                asyncio.CancelledError
+            ):
+                await task
+
+        await shutdown()
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    try:
+
+        asyncio.run(
+            main()
+        )
+
+    except KeyboardInterrupt:
+
+        logger.info(
+            "Bot stopped"
+        )
