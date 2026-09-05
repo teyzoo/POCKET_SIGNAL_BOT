@@ -4,18 +4,16 @@ services:
     runtime: python
     plan: free
 
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && playwright install chromium
 
     startCommand: python main.py
 
     envVars:
+
       - key: BOT_TOKEN
         sync: false
 
       - key: OWNER_ID
-        sync: false
-
-      - key: JOIN_CHAT_ID
         sync: false
 
       - key: DATABASE_URL
@@ -24,7 +22,7 @@ services:
           property: connectionString
 
       - key: JOIN_REQUIRED
-        value: "true"
+        value: "false"
 
       - key: MIN_SIGNAL_SCORE
         value: "75"
@@ -38,7 +36,20 @@ services:
       - key: TIMEZONE
         value: "Europe/Moscow"
 
+      - key: PO_EMAIL
+        sync: false
+
+      - key: PO_PASSWORD
+        sync: false
+
+      - key: PO_AUTO_LOGIN
+        value: "true"
+
+      - key: PO_DEMO
+        value: "true"
+
 
 databases:
+
   - name: pocket-signal-db
     plan: free
