@@ -15,6 +15,9 @@ from aiogram import (
     F,
 )
 
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
 from aiogram.filters import (
     Command,
     CommandStart,
@@ -49,6 +52,10 @@ from market import market
 from signals import engine
 
 
+# ============================================================
+# LOGGING
+# ============================================================
+
 logging.basicConfig(
     level=logging.INFO,
     format=(
@@ -64,8 +71,12 @@ logger = logging.getLogger(
 )
 
 
+# ============================================================
+# FASTAPI
+# ============================================================
+
 app = FastAPI(
-    title="Pocket Signal Bot",
+    title="Pocket Signal Bot"
 )
 
 
@@ -87,16 +98,32 @@ async def health():
     }
 
 
+# ============================================================
+# TELEGRAM
+# ============================================================
+
 bot = Bot(
-    token=config.bot_token
+    token=config.bot_token,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML
+    ),
 )
 
 dp = Dispatcher()
+
+
+# ============================================================
+# GLOBAL SCANNER STATE
+# ============================================================
 
 AUTO_SIGNALS = True
 
 LAST_KEYS: set[str] = set()
 
+
+# ============================================================
+# MAIN KEYBOARD
+# ============================================================
 
 def main_keyboard(
     user: User,
@@ -142,6 +169,10 @@ def main_keyboard(
     )
 
 
+# ============================================================
+# OWNER KEYBOARD
+# ============================================================
+
 def owner_keyboard():
 
     return InlineKeyboardMarkup(
@@ -179,6 +210,10 @@ def owner_keyboard():
     )
 
 
+# ============================================================
+# SIGNAL SEARCH
+# ============================================================
+
 async def get_signal(
     pair: str,
     timeframe: int,
@@ -200,6 +235,10 @@ async def get_signal(
         candles,
     )
 
+
+# ============================================================
+# SEND SIGNAL
+# ============================================================
 
 async def send_signal(
     telegram_id: int,
@@ -258,6 +297,10 @@ async def send_signal(
     )
 
 
+# ============================================================
+# START
+# ============================================================
+
 @dp.message(CommandStart())
 async def start(
     message: Message,
@@ -299,6 +342,10 @@ async def start(
     )
 
 
+# ============================================================
+# OWNER
+# ============================================================
+
 @dp.message(Command("owner"))
 async def owner(
     message: Message,
@@ -316,6 +363,10 @@ async def owner(
         reply_markup=owner_keyboard(),
     )
 
+
+# ============================================================
+# MANUAL SIGNAL
+# ============================================================
 
 @dp.callback_query(
     F.data == "signal"
@@ -344,44 +395,63 @@ async def manual_signal(
         "🔎 Анализирую OTC..."
     )
 
-    if user.pair == "ANY":
+    try:
 
-        best = None
+        if user.pair == "ANY":
 
-        for pair in config.pairs:
+            best = None
 
-            try:
+            for pair in config.pairs:
 
-                result = await get_signal(
-                    pair,
-                    user.timeframe,
-                )
+                try:
 
-                if result:
+                    result = await get_signal(
+                        pair,
+                        user.timeframe,
+                    )
 
-                    if (
-                        best is None
-                        or result.quality
-                        > best.quality
-                    ):
+                    if result:
 
-                        best = result
+                        if (
+                            best is None
+                            or result.quality
+                            > best.quality
+                        ):
 
-            except Exception:
+                            best = result
 
-                logger.exception(
-                    "Ошибка анализа %s",
-                    pair,
-                )
+                except Exception:
 
-        result = best
+                    logger.exception(
+                        "Ошибка анализа %s",
+                        pair,
+                    )
 
-    else:
+            result = best
 
-        result = await get_signal(
-            user.pair,
-            user.timeframe,
+        else:
+
+            result = await get_signal(
+                user.pair,
+                user.timeframe,
+            )
+
+    except Exception:
+
+        logger.exception(
+            "Ошибка ручного сигнала"
         )
+
+        await call.message.answer(
+            "⚠️ Не удалось получить данные OTC.\n\n"
+            "Попробуй ещё раз через несколько секунд."
+        )
+
+        return
+
+    # ========================================================
+    # NO SIGNAL
+    # ========================================================
 
     if not result:
 
@@ -392,6 +462,10 @@ async def manual_signal(
         )
 
         return
+
+    # ========================================================
+    # SAVE + SEND
+    # ========================================================
 
     await save_signal(
         pair=result.pair,
@@ -410,6 +484,10 @@ async def manual_signal(
     )
 
 
+# ============================================================
+# TOGGLE USER AUTO SIGNALS
+# ============================================================
+
 @dp.callback_query(
     F.data == "toggle_auto"
 )
@@ -423,6 +501,11 @@ async def toggle_auto(
 
     if not user:
 
+        await call.answer(
+            "Пользователь не найден.",
+            show_alert=True,
+        )
+
         return
 
     value = not user.auto_signals
@@ -434,11 +517,17 @@ async def toggle_auto(
 
     user.auto_signals = value
 
-    await call.message.edit_reply_markup(
-        reply_markup=main_keyboard(
-            user
+    try:
+
+        await call.message.edit_reply_markup(
+            reply_markup=main_keyboard(
+                user
+            )
         )
-    )
+
+    except Exception:
+
+        pass
 
     await call.answer(
         "Автосигналы "
@@ -449,6 +538,10 @@ async def toggle_auto(
         )
     )
 
+
+# ============================================================
+# PAIRS MENU
+# ============================================================
 
 @dp.callback_query(
     F.data == "pairs"
@@ -501,6 +594,10 @@ async def pairs_menu(
     await call.answer()
 
 
+# ============================================================
+# CHOOSE PAIR
+# ============================================================
+
 @dp.callback_query(
     F.data.startswith("pair_")
 )
@@ -512,15 +609,36 @@ async def choose_pair(
         len("pair_"):
     ]
 
+    if (
+        pair != "ANY"
+        and pair not in config.pairs
+    ):
+
+        await call.answer(
+            "Неизвестная пара.",
+            show_alert=True,
+        )
+
+        return
+
     await update_user(
         call.from_user.id,
         pair=pair,
     )
 
     await call.answer(
-        f"Выбрано: {pair}"
+        "Выбрано: "
+        + (
+            "Любая пара"
+            if pair == "ANY"
+            else pair
+        )
     )
 
+
+# ============================================================
+# TIMEFRAMES MENU
+# ============================================================
 
 @dp.callback_query(
     F.data == "timeframes"
@@ -566,6 +684,10 @@ async def timeframes_menu(
     await call.answer()
 
 
+# ============================================================
+# CHOOSE TIMEFRAME
+# ============================================================
+
 @dp.callback_query(
     F.data.startswith("time_")
 )
@@ -573,11 +695,31 @@ async def choose_time(
     call: CallbackQuery,
 ):
 
-    timeframe = int(
-        call.data[
-            len("time_"):
-        ]
-    )
+    try:
+
+        timeframe = int(
+            call.data[
+                len("time_"):
+            ]
+        )
+
+    except ValueError:
+
+        await call.answer(
+            "Ошибка времени.",
+            show_alert=True,
+        )
+
+        return
+
+    if timeframe not in config.timeframes:
+
+        await call.answer(
+            "Недопустимая экспирация.",
+            show_alert=True,
+        )
+
+        return
 
     await update_user(
         call.from_user.id,
@@ -588,6 +730,10 @@ async def choose_time(
         f"Экспирация: {timeframe} мин."
     )
 
+
+# ============================================================
+# SETTINGS
+# ============================================================
 
 @dp.callback_query(
     F.data == "settings"
@@ -601,6 +747,11 @@ async def settings(
     )
 
     if not user:
+
+        await call.answer(
+            "Пользователь не найден.",
+            show_alert=True,
+        )
 
         return
 
@@ -625,6 +776,10 @@ async def settings(
 
     await call.answer()
 
+
+# ============================================================
+# OWNER STATS
+# ============================================================
 
 @dp.callback_query(
     F.data == "owner_stats"
@@ -651,7 +806,10 @@ async def owner_stats(
         f"<b>{users['total']}</b>\n"
 
         f"🟢 Активных: "
-        f"<b>{users['active']}</b>\n\n"
+        f"<b>{users['active']}</b>\n"
+
+        f"🔴 Заблокированных: "
+        f"<b>{users['blocked']}</b>\n\n"
 
         f"📡 Сигналов: "
         f"<b>{signals['total']}</b>\n"
@@ -668,6 +826,10 @@ async def owner_stats(
 
     await call.answer()
 
+
+# ============================================================
+# OWNER USERS
+# ============================================================
 
 @dp.callback_query(
     F.data == "owner_users"
@@ -686,14 +848,24 @@ async def owner_users(
     stats = await get_user_stats()
 
     await call.message.answer(
-        f"👥 Всего пользователей: "
+        "👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n"
+
+        f"Всего: "
         f"<b>{stats['total']}</b>\n"
+
         f"🟢 Активных: "
-        f"<b>{stats['active']}</b>"
+        f"<b>{stats['active']}</b>\n"
+
+        f"🔴 Заблокированных: "
+        f"<b>{stats['blocked']}</b>"
     )
 
     await call.answer()
 
+
+# ============================================================
+# OWNER SIGNALS
+# ============================================================
 
 @dp.callback_query(
     F.data == "owner_signals"
@@ -713,6 +885,16 @@ async def owner_signals(
         10
     )
 
+    if not rows:
+
+        await call.message.answer(
+            "📡 Сигналов пока нет."
+        )
+
+        await call.answer()
+
+        return
+
     text = (
         "📡 <b>ПОСЛЕДНИЕ СИГНАЛЫ</b>\n\n"
     )
@@ -720,11 +902,11 @@ async def owner_signals(
     for row in rows:
 
         text += (
-            f"{row.pair} | "
-            f"{row.direction} | "
+            f"• {row.pair}\n"
+            f"  {row.direction} | "
             f"{row.timeframe}м | "
             f"{row.probability:.1f}% | "
-            f"{row.status}\n"
+            f"{row.status}\n\n"
         )
 
     await call.message.answer(
@@ -733,6 +915,10 @@ async def owner_signals(
 
     await call.answer()
 
+
+# ============================================================
+# OWNER PAIRS
+# ============================================================
 
 @dp.callback_query(
     F.data == "owner_pairs"
@@ -769,6 +955,10 @@ async def owner_pairs(
     await call.answer()
 
 
+# ============================================================
+# OWNER AUTO SCANNER
+# ============================================================
+
 @dp.callback_query(
     F.data == "owner_auto"
 )
@@ -798,6 +988,10 @@ async def owner_auto(
     )
 
 
+# ============================================================
+# AUTOMATIC SCANNER
+# ============================================================
+
 async def scanner():
 
     global LAST_KEYS
@@ -815,6 +1009,10 @@ async def scanner():
                 requested = set()
 
                 for user in users:
+
+                    if not user.auto_signals:
+
+                        continue
 
                     pairs = (
                         config.pairs
@@ -852,6 +1050,11 @@ async def scanner():
 
                         continue
 
+                    # ====================================================
+                    # ВАЖНО:
+                    # ЕСЛИ СИГНАЛА НЕТ — НИЧЕГО НЕ ОТПРАВЛЯЕМ.
+                    # ====================================================
+
                     if not result:
 
                         continue
@@ -869,9 +1072,7 @@ async def scanner():
 
                     LAST_KEYS.add(key)
 
-                    if len(
-                        LAST_KEYS
-                    ) > 1000:
+                    if len(LAST_KEYS) > 1000:
 
                         LAST_KEYS = set(
                             list(
@@ -921,7 +1122,9 @@ async def scanner():
                         except Exception:
 
                             logger.exception(
-                                "Не удалось отправить сигнал"
+                                "Не удалось отправить сигнал "
+                                "пользователю %s",
+                                user.telegram_id,
                             )
 
         except Exception:
@@ -938,6 +1141,10 @@ async def scanner():
         )
 
 
+# ============================================================
+# RESULT LOOP
+# ============================================================
+
 async def result_loop():
 
     while True:
@@ -952,8 +1159,14 @@ async def result_loop():
                 "Ошибка result loop"
             )
 
-        await asyncio.sleep(30)
+        await asyncio.sleep(
+            30
+        )
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 async def main():
 
@@ -1029,6 +1242,10 @@ async def main():
 
             await bot.session.close()
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
 
