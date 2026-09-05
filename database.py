@@ -16,12 +16,18 @@ from sqlalchemy import (
     select,
     text,
 )
+
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+)
 
 from config import config
 
@@ -31,10 +37,14 @@ from config import config
 # ============================================================
 
 def normalize_database_url(url: str) -> str:
+
     if not url:
-        raise RuntimeError("DATABASE_URL is empty")
+        raise RuntimeError(
+            "DATABASE_URL is empty"
+        )
 
     if url.startswith("postgres://"):
+
         return url.replace(
             "postgres://",
             "postgresql+asyncpg://",
@@ -42,13 +52,17 @@ def normalize_database_url(url: str) -> str:
         )
 
     if url.startswith("postgresql://"):
+
         return url.replace(
             "postgresql://",
             "postgresql+asyncpg://",
             1,
         )
 
-    if url.startswith("postgresql+psycopg2://"):
+    if url.startswith(
+        "postgresql+psycopg2://"
+    ):
+
         return url.replace(
             "postgresql+psycopg2://",
             "postgresql+asyncpg://",
@@ -56,6 +70,7 @@ def normalize_database_url(url: str) -> str:
         )
 
     if url.startswith("sqlite:///"):
+
         return url.replace(
             "sqlite:///",
             "sqlite+aiosqlite:///",
@@ -98,14 +113,35 @@ class Base(DeclarativeBase):
 
 
 # ============================================================
-# UTC HELPER
+# UTC
 # ============================================================
 
 def utc_now() -> datetime:
     """
-    Всегда возвращает timezone-aware UTC datetime.
+    Текущее время в UTC.
     """
-    return datetime.now(timezone.utc)
+
+    return datetime.now(
+        timezone.utc
+    )
+
+
+def ensure_utc(
+    value: datetime,
+) -> datetime:
+    """
+    Приводит datetime к UTC.
+    """
+
+    if value.tzinfo is None:
+
+        return value.replace(
+            tzinfo=timezone.utc
+        )
+
+    return value.astimezone(
+        timezone.utc
+    )
 
 
 # ============================================================
@@ -113,6 +149,7 @@ def utc_now() -> datetime:
 # ============================================================
 
 class User(Base):
+
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(
@@ -120,10 +157,13 @@ class User(Base):
         primary_key=True,
     )
 
+    # ВАЖНО:
+    # Telegram ID должен быть BIGINT.
     telegram_id: Mapped[int] = mapped_column(
         BigInteger,
         unique=True,
         index=True,
+        nullable=False,
     )
 
     username: Mapped[str | None] = mapped_column(
@@ -184,6 +224,7 @@ class User(Base):
 # ============================================================
 
 class JoinRequest(Base):
+
     __tablename__ = "join_requests"
 
     id: Mapped[int] = mapped_column(
@@ -191,9 +232,11 @@ class JoinRequest(Base):
         primary_key=True,
     )
 
+    # Telegram ID тоже BIGINT.
     telegram_id: Mapped[int] = mapped_column(
         BigInteger,
         index=True,
+        nullable=False,
     )
 
     username: Mapped[str | None] = mapped_column(
@@ -224,6 +267,7 @@ class JoinRequest(Base):
 # ============================================================
 
 class Signal(Base):
+
     __tablename__ = "signals"
 
     id: Mapped[int] = mapped_column(
@@ -234,30 +278,37 @@ class Signal(Base):
     pair: Mapped[str] = mapped_column(
         String(32),
         index=True,
+        nullable=False,
     )
 
     timeframe: Mapped[int] = mapped_column(
         Integer,
+        nullable=False,
     )
 
     direction: Mapped[str] = mapped_column(
         String(16),
+        nullable=False,
     )
 
     probability: Mapped[float] = mapped_column(
         Float,
+        nullable=False,
     )
 
     quality: Mapped[float] = mapped_column(
         Float,
+        nullable=False,
     )
 
     entry_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        nullable=False,
     )
 
     close_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        nullable=False,
     )
 
     status: Mapped[str] = mapped_column(
@@ -288,6 +339,7 @@ class Signal(Base):
 # ============================================================
 
 class Setting(Base):
+
     __tablename__ = "settings"
 
     id: Mapped[int] = mapped_column(
@@ -298,26 +350,81 @@ class Setting(Base):
     key: Mapped[str] = mapped_column(
         String(128),
         unique=True,
+        nullable=False,
     )
 
     value: Mapped[str] = mapped_column(
         Text,
+        nullable=False,
     )
 
 
 # ============================================================
-# DATABASE INIT
+# DATABASE INITIALIZATION
 # ============================================================
 
 async def init_db():
+
     async with engine.begin() as conn:
+
+        # ----------------------------------------------------
+        # Создание отсутствующих таблиц
+        # ----------------------------------------------------
+
         await conn.run_sync(
             Base.metadata.create_all
         )
 
+        # ----------------------------------------------------
+        # MIGRATION
+        #
+        # Старые версии бота создавали telegram_id
+        # как INTEGER.
+        #
+        # Telegram ID пользователя:
+        #
+        # 7364836929
+        #
+        # больше максимального INTEGER:
+        #
+        # 2147483647
+        #
+        # Поэтому переводим на BIGINT.
+        # ----------------------------------------------------
+
+        if conn.dialect.name == "postgresql":
+
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE users
+                    ALTER COLUMN telegram_id
+                    TYPE BIGINT
+                    USING telegram_id::BIGINT
+                    """
+                )
+            )
+
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE join_requests
+                    ALTER COLUMN telegram_id
+                    TYPE BIGINT
+                    USING telegram_id::BIGINT
+                    """
+                )
+            )
+
+        # ----------------------------------------------------
+        # COMMIT
+        # ----------------------------------------------------
+
+        await conn.commit()
+
 
 # ============================================================
-# USER FUNCTIONS
+# GET USER
 # ============================================================
 
 async def get_user(
@@ -335,6 +442,10 @@ async def get_user(
         return result.scalar_one_or_none()
 
 
+# ============================================================
+# ENSURE USER
+# ============================================================
+
 async def ensure_user(
     telegram_id: int,
     username: str | None,
@@ -351,6 +462,10 @@ async def ensure_user(
 
         user = result.scalar_one_or_none()
 
+        # ----------------------------------------------------
+        # NEW USER
+        # ----------------------------------------------------
+
         if user is None:
 
             user = User(
@@ -358,22 +473,34 @@ async def ensure_user(
                 username=username,
                 first_name=first_name,
                 access=(
-                    telegram_id == config.owner_id
+                    telegram_id
+                    == config.owner_id
                 ),
+                blocked=False,
+                pair="ANY",
+                timeframe=5,
+                auto_signals=True,
                 created_at=utc_now(),
                 last_seen=utc_now(),
             )
 
             session.add(user)
 
+        # ----------------------------------------------------
+        # EXISTING USER
+        # ----------------------------------------------------
+
         else:
 
             user.username = username
+
             user.first_name = first_name
+
             user.last_seen = utc_now()
 
-            # Владелец всегда имеет доступ
+            # Владелец всегда получает доступ.
             if telegram_id == config.owner_id:
+
                 user.access = True
                 user.blocked = False
 
@@ -382,10 +509,15 @@ async def ensure_user(
         return user
 
 
+# ============================================================
+# UPDATE USER
+# ============================================================
+
 async def update_user(
     telegram_id: int,
     **kwargs: Any,
 ):
+
     async with Session() as session:
 
         result = await session.execute(
@@ -396,12 +528,13 @@ async def update_user(
 
         user = result.scalar_one_or_none()
 
-        if not user:
+        if user is None:
             return
 
         for key, value in kwargs.items():
 
             if hasattr(user, key):
+
                 setattr(
                     user,
                     key,
@@ -414,7 +547,7 @@ async def update_user(
 
 
 # ============================================================
-# JOIN REQUESTS
+# SAVE JOIN REQUEST
 # ============================================================
 
 async def save_join_request(
@@ -427,14 +560,19 @@ async def save_join_request(
 
         result = await session.execute(
             select(JoinRequest).where(
-                JoinRequest.telegram_id == telegram_id,
-                JoinRequest.status == "pending",
+                JoinRequest.telegram_id
+                == telegram_id,
+                JoinRequest.status
+                == "pending",
             )
         )
 
-        existing = result.scalar_one_or_none()
+        existing = (
+            result.scalar_one_or_none()
+        )
 
         if existing:
+
             return existing
 
         request = JoinRequest(
@@ -451,6 +589,10 @@ async def save_join_request(
 
         return request
 
+
+# ============================================================
+# SET JOIN REQUEST STATUS
+# ============================================================
 
 async def set_join_request_status(
     request_id: int,
@@ -471,6 +613,10 @@ async def set_join_request_status(
             await session.commit()
 
 
+# ============================================================
+# GET PENDING REQUESTS
+# ============================================================
+
 async def get_pending_requests():
 
     async with Session() as session:
@@ -478,7 +624,8 @@ async def get_pending_requests():
         result = await session.execute(
             select(JoinRequest)
             .where(
-                JoinRequest.status == "pending"
+                JoinRequest.status
+                == "pending"
             )
             .order_by(
                 JoinRequest.created_at.desc()
@@ -491,7 +638,7 @@ async def get_pending_requests():
 
 
 # ============================================================
-# SIGNALS
+# SAVE SIGNAL
 # ============================================================
 
 async def save_signal(
@@ -505,24 +652,13 @@ async def save_signal(
     reasons: list[str],
 ):
 
-    # Приводим входящие даты к UTC
-    if entry_time.tzinfo is None:
-        entry_time = entry_time.replace(
-            tzinfo=timezone.utc
-        )
-    else:
-        entry_time = entry_time.astimezone(
-            timezone.utc
-        )
+    entry_time = ensure_utc(
+        entry_time
+    )
 
-    if close_time.tzinfo is None:
-        close_time = close_time.replace(
-            tzinfo=timezone.utc
-        )
-    else:
-        close_time = close_time.astimezone(
-            timezone.utc
-        )
+    close_time = ensure_utc(
+        close_time
+    )
 
     async with Session() as session:
 
@@ -530,13 +666,19 @@ async def save_signal(
             pair=pair,
             timeframe=timeframe,
             direction=direction,
-            probability=float(probability),
-            quality=float(quality),
+            probability=float(
+                probability
+            ),
+            quality=float(
+                quality
+            ),
             entry_time=entry_time,
             close_time=close_time,
             status="ACTIVE",
             result=None,
-            reasons=" | ".join(reasons),
+            reasons=" | ".join(
+                reasons
+            ),
             created_at=utc_now(),
         )
 
@@ -546,6 +688,10 @@ async def save_signal(
 
         return signal
 
+
+# ============================================================
+# GET RECENT SIGNALS
+# ============================================================
 
 async def get_recent_signals(
     limit: int = 10,
@@ -567,7 +713,7 @@ async def get_recent_signals(
 
 
 # ============================================================
-# SIGNAL STATISTICS
+# GET SIGNAL STATS
 # ============================================================
 
 async def get_signal_stats():
@@ -577,7 +723,9 @@ async def get_signal_stats():
         total = (
             await session.execute(
                 select(
-                    func.count(Signal.id)
+                    func.count(
+                        Signal.id
+                    )
                 )
             )
         ).scalar() or 0
@@ -585,7 +733,9 @@ async def get_signal_stats():
         wins = (
             await session.execute(
                 select(
-                    func.count(Signal.id)
+                    func.count(
+                        Signal.id
+                    )
                 ).where(
                     Signal.result == "WIN"
                 )
@@ -595,7 +745,9 @@ async def get_signal_stats():
         losses = (
             await session.execute(
                 select(
-                    func.count(Signal.id)
+                    func.count(
+                        Signal.id
+                    )
                 ).where(
                     Signal.result == "LOSS"
                 )
@@ -605,20 +757,31 @@ async def get_signal_stats():
         active = (
             await session.execute(
                 select(
-                    func.count(Signal.id)
+                    func.count(
+                        Signal.id
+                    )
                 ).where(
-                    Signal.status == "ACTIVE"
+                    Signal.status
+                    == "ACTIVE"
                 )
             )
         ).scalar() or 0
 
-        completed = wins + losses
-
-        winrate = (
-            (wins / completed) * 100
-            if completed
-            else 0
+        completed = (
+            wins + losses
         )
+
+        if completed:
+
+            winrate = (
+                wins
+                / completed
+                * 100
+            )
+
+        else:
+
+            winrate = 0.0
 
         return {
             "total": total,
@@ -630,7 +793,7 @@ async def get_signal_stats():
 
 
 # ============================================================
-# USER STATISTICS
+# GET USER STATS
 # ============================================================
 
 async def get_user_stats():
@@ -640,7 +803,9 @@ async def get_user_stats():
         total = (
             await session.execute(
                 select(
-                    func.count(User.id)
+                    func.count(
+                        User.id
+                    )
                 )
             )
         ).scalar() or 0
@@ -648,7 +813,9 @@ async def get_user_stats():
         active = (
             await session.execute(
                 select(
-                    func.count(User.id)
+                    func.count(
+                        User.id
+                    )
                 ).where(
                     User.access.is_(True),
                     User.blocked.is_(False),
@@ -659,7 +826,9 @@ async def get_user_stats():
         blocked = (
             await session.execute(
                 select(
-                    func.count(User.id)
+                    func.count(
+                        User.id
+                    )
                 ).where(
                     User.blocked.is_(True)
                 )
@@ -672,6 +841,10 @@ async def get_user_stats():
             "blocked": blocked,
         }
 
+
+# ============================================================
+# GET USERS WITH ACCESS
+# ============================================================
 
 async def get_access_users():
 
@@ -690,7 +863,7 @@ async def get_access_users():
 
 
 # ============================================================
-# PAIR STATISTICS
+# GET PAIR STATS
 # ============================================================
 
 async def get_pair_stats():
@@ -700,22 +873,27 @@ async def get_pair_stats():
         result = await session.execute(
             select(
                 Signal.pair,
-                func.count(Signal.id).label(
-                    "total"
-                ),
+
+                func.count(
+                    Signal.id
+                ).label("total"),
+
                 func.sum(
                     case(
                         (
-                            Signal.result == "WIN",
+                            Signal.result
+                            == "WIN",
                             1,
                         ),
                         else_=0,
                     )
                 ).label("wins"),
+
                 func.sum(
                     case(
                         (
-                            Signal.result == "LOSS",
+                            Signal.result
+                            == "LOSS",
                             1,
                         ),
                         else_=0,
@@ -736,7 +914,7 @@ async def get_pair_stats():
 
 
 # ============================================================
-# SETTINGS
+# SETTING
 # ============================================================
 
 async def set_setting(
@@ -752,7 +930,9 @@ async def set_setting(
             )
         )
 
-        setting = result.scalar_one_or_none()
+        setting = (
+            result.scalar_one_or_none()
+        )
 
         if setting:
 
@@ -760,15 +940,19 @@ async def set_setting(
 
         else:
 
-            session.add(
-                Setting(
-                    key=key,
-                    value=value,
-                )
+            setting = Setting(
+                key=key,
+                value=value,
             )
+
+            session.add(setting)
 
         await session.commit()
 
+
+# ============================================================
+# GET SETTING
+# ============================================================
 
 async def get_setting(
     key: str,
@@ -783,23 +967,26 @@ async def get_setting(
             )
         )
 
-        setting = result.scalar_one_or_none()
+        setting = (
+            result.scalar_one_or_none()
+        )
 
         if setting:
+
             return setting.value
 
         return default
 
 
 # ============================================================
-# EXPIRED SIGNALS
+# GET EXPIRED SIGNALS
 # ============================================================
 
 async def get_expired_signals():
 
-    async with Session() as session:
+    now = utc_now()
 
-        now = utc_now()
+    async with Session() as session:
 
         result = await session.execute(
             select(Signal).where(
@@ -813,11 +1000,15 @@ async def get_expired_signals():
         )
 
 
+# ============================================================
+# MARK EXPIRED SIGNALS
+# ============================================================
+
 async def mark_expired_signals():
 
-    async with Session() as session:
+    now = utc_now()
 
-        now = utc_now()
+    async with Session() as session:
 
         result = await session.execute(
             select(Signal).where(
@@ -837,3 +1028,54 @@ async def mark_expired_signals():
         await session.commit()
 
         return signals
+
+
+# ============================================================
+# UPDATE SIGNAL RESULT
+# ============================================================
+
+async def update_signal_result(
+    signal_id: int,
+    result_value: str,
+):
+
+    result_value = result_value.upper()
+
+    if result_value not in {
+        "WIN",
+        "LOSS",
+        "DRAW",
+    }:
+
+        raise ValueError(
+            "Invalid signal result"
+        )
+
+    async with Session() as session:
+
+        signal = await session.get(
+            Signal,
+            signal_id,
+        )
+
+        if signal is None:
+            return None
+
+        signal.result = result_value
+
+        signal.status = (
+            "COMPLETED"
+        )
+
+        await session.commit()
+
+        return signal
+
+
+# ============================================================
+# CLOSE DATABASE
+# ============================================================
+
+async def close_database():
+
+    await engine.dispose()
