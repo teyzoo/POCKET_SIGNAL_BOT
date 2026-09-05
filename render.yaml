@@ -8,7 +8,8 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-      python -m playwright install --with-deps chromium firefox chrome
+      python -m playwright install --with-deps chromium firefox
+      python -m playwright install chrome
 
     startCommand: python main.py
 
