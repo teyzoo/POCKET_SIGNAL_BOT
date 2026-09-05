@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -59,29 +61,318 @@ class PocketMarket:
     # ========================================================
 
     @staticmethod
+    def _get_playwright_browser_path() -> str:
+        """
+        Возвращает директорию Playwright browsers.
+
+        Приоритет:
+        1. PLAYWRIGHT_BROWSERS_PATH из окружения Render.
+        2. /opt/render/project/src/.cache/ms-playwright
+        3. .cache/ms-playwright относительно текущего проекта.
+        """
+
+        configured_path = os.environ.get(
+            "PLAYWRIGHT_BROWSERS_PATH"
+        )
+
+        if configured_path:
+            return os.path.abspath(
+                os.path.expanduser(
+                    configured_path
+                )
+            )
+
+        render_path = (
+            "/opt/render/project/src/"
+            ".cache/ms-playwright"
+        )
+
+        if os.path.isdir(
+            "/opt/render/project/src"
+        ):
+            return render_path
+
+        return os.path.abspath(
+            os.path.join(
+                os.getcwd(),
+                ".cache",
+                "ms-playwright",
+            )
+        )
+
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _find_browser_executables(
+        browser_path: str,
+    ) -> list[str]:
+
+        found: list[str] = []
+
+        if not os.path.isdir(browser_path):
+            return found
+
+        try:
+
+            for root, dirs, files in os.walk(
+                browser_path
+            ):
+
+                for filename in files:
+
+                    if filename in (
+                        "chrome",
+                        "chrome-headless-shell",
+                        "chromium",
+                        "firefox",
+                    ):
+
+                        full_path = os.path.join(
+                            root,
+                            filename,
+                        )
+
+                        if os.path.isfile(
+                            full_path
+                        ):
+
+                            found.append(
+                                full_path
+                            )
+
+        except Exception:
+
+            logger.exception(
+                "Не удалось просканировать "
+                "Playwright browser directory."
+            )
+
+        return found
+
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _get_chromium_executable() -> str | None:
+
+        try:
+
+            from playwright.sync_api import (
+                sync_playwright,
+            )
+
+        except Exception as exc:
+
+            raise RuntimeError(
+                "Playwright не импортируется: "
+                f"{exc}"
+            ) from exc
+
+        try:
+
+            with sync_playwright() as pw:
+
+                path = (
+                    pw.chromium.executable_path
+                )
+
+                if path:
+                    return path
+
+        except Exception as exc:
+
+            logger.warning(
+                "Не удалось получить Chromium "
+                "executable path: %s",
+                exc,
+            )
+
+        return None
+
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _install_chromium(
+        browser_path: str,
+    ) -> None:
+        """
+        Устанавливает Chromium через текущую
+        установленную версию Playwright.
+
+        Никаких жёстких chromium-XXXX путей.
+        """
+
+        logger.warning(
+            "Playwright Chromium отсутствует. "
+            "Запускаю установку Chromium..."
+        )
+
+        env = os.environ.copy()
+
+        env[
+            "PLAYWRIGHT_BROWSERS_PATH"
+        ] = browser_path
+
+        command = [
+            sys.executable,
+            "-m",
+            "playwright",
+            "install",
+            "chromium",
+        ]
+
+        logger.info(
+            "Playwright install command: %s",
+            " ".join(command),
+        )
+
+        try:
+
+            process = subprocess.run(
+                command,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+
+        except subprocess.TimeoutExpired as exc:
+
+            raise RuntimeError(
+                "Установка Playwright Chromium "
+                "превысила timeout 300 секунд."
+            ) from exc
+
+        except Exception as exc:
+
+            raise RuntimeError(
+                "Не удалось запустить установку "
+                "Chromium: "
+                f"{exc}"
+            ) from exc
+
+        output = (
+            process.stdout or ""
+        ).strip()
+
+        if output:
+
+            logger.info(
+                "Playwright install output:\n%s",
+                output[-15000:],
+            )
+
+        if process.returncode != 0:
+
+            raise RuntimeError(
+                "Playwright Chromium не удалось "
+                "установить. "
+                f"Код завершения: "
+                f"{process.returncode}"
+            )
+
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _launch_test_browser(
+        executable_path: str | None = None,
+    ) -> None:
+        """
+        Фактически запускает Chromium и проверяет,
+        что браузер не только установлен,
+        но и способен работать в Render.
+        """
+
+        from playwright.sync_api import (
+            sync_playwright,
+        )
+
+        browser = None
+
+        try:
+
+            with sync_playwright() as pw:
+
+                launch_kwargs: dict[str, Any] = {
+                    "headless": True,
+                    "args": [
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-setuid-sandbox",
+                        "--no-zygote",
+                    ],
+                }
+
+                if executable_path:
+
+                    launch_kwargs[
+                        "executable_path"
+                    ] = executable_path
+
+                browser = (
+                    pw.chromium.launch(
+                        **launch_kwargs
+                    )
+                )
+
+                logger.info(
+                    "Playwright Chromium "
+                    "успешно запущен."
+                )
+
+        except Exception as exc:
+
+            logger.exception(
+                "Chromium установлен, "
+                "но не смог запуститься."
+            )
+
+            raise RuntimeError(
+                "Playwright Chromium установлен, "
+                "но не запускается: "
+                f"{exc}"
+            ) from exc
+
+        finally:
+
+            if browser is not None:
+
+                try:
+                    browser.close()
+
+                except Exception:
+
+                    logger.exception(
+                        "Ошибка закрытия "
+                        "диагностического Chromium."
+                    )
+
+    # --------------------------------------------------------
+
+    @staticmethod
     def _prepare_playwright_environment() -> None:
         """
         Подготавливает Playwright для Render.
 
-        Браузеры должны находиться здесь:
+        Главное отличие от старой версии:
 
-            /opt/render/project/src/.cache/ms-playwright
+        НЕ используется:
+            chromium-1234
 
-        render.yaml устанавливает браузеры туда же.
-
-        Это специально сделано для того, чтобы build и runtime
-        использовали одну и ту же директорию.
+        Playwright самостоятельно определяет
+        установленную версию Chromium.
         """
 
         browser_path = (
-            "/opt/render/project/src/.cache/ms-playwright"
+            PocketMarket
+            ._get_playwright_browser_path()
         )
 
-        # ----------------------------------------------------
-        # Принудительно устанавливаем единый путь.
-        # ----------------------------------------------------
-
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_path
+        os.environ[
+            "PLAYWRIGHT_BROWSERS_PATH"
+        ] = browser_path
 
         logger.info(
             "PLAYWRIGHT_BROWSERS_PATH=%s",
@@ -94,11 +385,14 @@ class PocketMarket:
         )
 
         # ----------------------------------------------------
-        # Import Playwright
+        # Проверяем Playwright
         # ----------------------------------------------------
 
         try:
-            from playwright.sync_api import sync_playwright
+
+            from playwright.sync_api import (
+                sync_playwright,
+            )
 
         except Exception as exc:
 
@@ -108,8 +402,12 @@ class PocketMarket:
             ) from exc
 
         # ----------------------------------------------------
-        # Проверяем браузеры
+        # Получаем пути, которые Playwright считает
+        # актуальными.
         # ----------------------------------------------------
+
+        chromium_path: str | None = None
+        firefox_path: str | None = None
 
         try:
 
@@ -123,137 +421,171 @@ class PocketMarket:
                     pw.firefox.executable_path
                 )
 
-                logger.info(
-                    "Playwright Chromium executable: %s",
-                    chromium_path,
-                )
+        except Exception as exc:
 
-                logger.info(
-                    "Playwright Firefox executable: %s",
-                    firefox_path,
-                )
-
-                chromium_exists = bool(
-                    chromium_path
-                    and os.path.isfile(
-                        chromium_path
-                    )
-                )
-
-                firefox_exists = bool(
-                    firefox_path
-                    and os.path.isfile(
-                        firefox_path
-                    )
-                )
-
-                logger.info(
-                    "Chromium installed: %s",
-                    chromium_exists,
-                )
-
-                logger.info(
-                    "Firefox installed: %s",
-                    firefox_exists,
-                )
-
-                # ------------------------------------------------
-                # Если Chromium отсутствует — подробная диагностика
-                # ------------------------------------------------
-
-                if not chromium_exists:
-
-                    found_browsers: list[str] = []
-
-                    try:
-
-                        for root, dirs, files in os.walk(
-                            browser_path
-                        ):
-
-                            for filename in files:
-
-                                if filename in (
-                                    "chrome",
-                                    "firefox",
-                                ):
-
-                                    found_browsers.append(
-                                        os.path.join(
-                                            root,
-                                            filename,
-                                        )
-                                    )
-
-                    except Exception:
-
-                        logger.exception(
-                            "Не удалось просканировать "
-                            "Playwright browser directory."
-                        )
-
-                    logger.error(
-                        "Найденные browser executables: %s",
-                        found_browsers,
-                    )
-
-                    raise RuntimeError(
-                        "Playwright Chromium не установлен. "
-                        f"Ожидаемый путь: {chromium_path}. "
-                        f"Browser directory: {browser_path}"
-                    )
-
-                # ------------------------------------------------
-                # Реальный запуск Chromium
-                # ------------------------------------------------
-
-                logger.info(
-                    "Проверяю фактический запуск "
-                    "Playwright Chromium..."
-                )
-
-                browser = None
-
-                try:
-
-                    browser = pw.chromium.launch(
-                        headless=True,
-                        args=[
-                            "--no-sandbox",
-                            "--disable-dev-shm-usage",
-                            "--disable-gpu",
-                        ],
-                    )
-
-                    logger.info(
-                        "Playwright Chromium успешно запущен."
-                    )
-
-                finally:
-
-                    if browser is not None:
-
-                        try:
-                            browser.close()
-
-                        except Exception:
-
-                            logger.exception(
-                                "Ошибка закрытия "
-                                "диагностического Chromium."
-                            )
-
-        except asyncio.CancelledError:
-            raise
-
-        except Exception:
-
-            logger.exception(
-                "Диагностика Playwright "
-                "завершилась ошибкой."
+            logger.warning(
+                "Не удалось получить browser "
+                "paths из Playwright: %s",
+                exc,
             )
 
-            raise
+        logger.info(
+            "Playwright Chromium executable: %s",
+            chromium_path,
+        )
+
+        logger.info(
+            "Playwright Firefox executable: %s",
+            firefox_path,
+        )
+
+        chromium_exists = bool(
+            chromium_path
+            and os.path.isfile(
+                chromium_path
+            )
+        )
+
+        firefox_exists = bool(
+            firefox_path
+            and os.path.isfile(
+                firefox_path
+            )
+        )
+
+        logger.info(
+            "Chromium installed: %s",
+            chromium_exists,
+        )
+
+        logger.info(
+            "Firefox installed: %s",
+            firefox_exists,
+        )
+
+        # ----------------------------------------------------
+        # Если Chromium отсутствует —
+        # пытаемся установить.
+        # ----------------------------------------------------
+
+        if not chromium_exists:
+
+            found_browsers = (
+                PocketMarket
+                ._find_browser_executables(
+                    browser_path
+                )
+            )
+
+            logger.warning(
+                "До установки найдены "
+                "browser executables: %s",
+                found_browsers,
+            )
+
+            PocketMarket._install_chromium(
+                browser_path
+            )
+
+            # ------------------------------------------------
+            # После установки заново получаем путь.
+            # ------------------------------------------------
+
+            chromium_path = (
+                PocketMarket
+                ._get_chromium_executable()
+            )
+
+            logger.info(
+                "Chromium executable after "
+                "installation: %s",
+                chromium_path,
+            )
+
+            chromium_exists = bool(
+                chromium_path
+                and os.path.isfile(
+                    chromium_path
+                )
+            )
+
+        # ----------------------------------------------------
+        # Если Playwright всё ещё не видит Chromium,
+        # ищем реальные executable.
+        # ----------------------------------------------------
+
+        if not chromium_exists:
+
+            found_browsers = (
+                PocketMarket
+                ._find_browser_executables(
+                    browser_path
+                )
+            )
+
+            logger.error(
+                "Найденные browser executables: %s",
+                found_browsers,
+            )
+
+            # ------------------------------------------------
+            # Иногда Playwright executable_path может
+            # отличаться от нашего ожидаемого пути.
+            # Если найден chrome — используем его.
+            # ------------------------------------------------
+
+            candidate = None
+
+            for path in found_browsers:
+
+                filename = os.path.basename(
+                    path
+                ).lower()
+
+                if filename in (
+                    "chrome",
+                    "chrome-headless-shell",
+                    "chromium",
+                ):
+
+                    candidate = path
+                    break
+
+            if candidate:
+
+                logger.info(
+                    "Найден Chromium вручную: %s",
+                    candidate,
+                )
+
+                chromium_path = candidate
+                chromium_exists = True
+
+        # ----------------------------------------------------
+        # Финальная проверка.
+        # ----------------------------------------------------
+
+        if not chromium_exists:
+
+            raise RuntimeError(
+                "Playwright Chromium отсутствует "
+                "даже после попытки установки. "
+                f"Browser directory: "
+                f"{browser_path}"
+            )
+
+        logger.info(
+            "Chromium найден: %s",
+            chromium_path,
+        )
+
+        # ----------------------------------------------------
+        # Реальный запуск.
+        # ----------------------------------------------------
+
+        PocketMarket._launch_test_browser(
+            executable_path=chromium_path
+        )
 
     # ========================================================
     # AUTO LOGIN
@@ -292,8 +624,7 @@ class PocketMarket:
         )
 
         # ----------------------------------------------------
-        # Playwright запускаем в отдельном thread,
-        # поскольку используется sync API.
+        # Проверяем Playwright в отдельном thread.
         # ----------------------------------------------------
 
         try:
@@ -303,6 +634,7 @@ class PocketMarket:
             )
 
         except asyncio.CancelledError:
+
             raise
 
         except Exception as exc:
@@ -357,12 +689,15 @@ class PocketMarket:
             )
 
         except asyncio.CancelledError:
+
             raise
 
         except Exception as exc:
 
             error_text = str(exc)
-            error_lower = error_text.lower()
+            error_lower = (
+                error_text.lower()
+            )
 
             self.last_error = error_text
 
@@ -391,12 +726,19 @@ class PocketMarket:
             # Browser
             # ------------------------------------------------
 
-            if (
-                "chromium distribution" in error_lower
-                or "chrome is not found" in error_lower
-                or "browser executable" in error_lower
-                or "executable doesn't exist" in error_lower
-                or "executable doesn't exist at" in error_lower
+            browser_errors = (
+                "chromium distribution",
+                "chrome is not found",
+                "browser executable",
+                "executable doesn't exist",
+                "executable doesn't exist at",
+                "browser_type.launch",
+                "failed to launch",
+            )
+
+            if any(
+                item in error_lower
+                for item in browser_errors
             ):
 
                 logger.error(
@@ -405,8 +747,8 @@ class PocketMarket:
                 )
 
                 raise RuntimeError(
-                    "Playwright не смог запустить браузер. "
-                    "Проверь установку Chromium в Render. "
+                    "Playwright не смог запустить "
+                    "Chromium для Pocket Option. "
                     f"Детали: {error_text}"
                 ) from exc
 
@@ -414,13 +756,18 @@ class PocketMarket:
             # Network
             # ------------------------------------------------
 
-            if (
-                "firewall" in error_lower
-                or "network" in error_lower
-                or "connection" in error_lower
-                or "timed out" in error_lower
-                or "timeout" in error_lower
-                or "net::" in error_lower
+            network_errors = (
+                "firewall",
+                "network",
+                "connection",
+                "timed out",
+                "timeout",
+                "net::",
+            )
+
+            if any(
+                item in error_lower
+                for item in network_errors
             ):
 
                 logger.error(
@@ -430,9 +777,9 @@ class PocketMarket:
                 )
 
                 raise RuntimeError(
-                    "Pocket Option недоступен из окружения "
-                    "Render или соединение завершилось "
-                    "по timeout. "
+                    "Pocket Option недоступен из "
+                    "окружения Render или соединение "
+                    "завершилось по timeout. "
                     f"Детали: {error_text}"
                 ) from exc
 
@@ -464,7 +811,9 @@ class PocketMarket:
                 "Pocket Option login не вернул SSID."
             )
 
-        ssid = str(ssid).strip()
+        ssid = str(
+            ssid
+        ).strip()
 
         if not ssid:
 
@@ -498,10 +847,6 @@ class PocketMarket:
 
         async with self.lock:
 
-            # ------------------------------------------------
-            # Уже подключены
-            # ------------------------------------------------
-
             if (
                 self.client is not None
                 and self.connected
@@ -519,7 +864,9 @@ class PocketMarket:
 
             if config.po_ssid:
 
-                ssid = config.po_ssid.strip()
+                ssid = (
+                    config.po_ssid.strip()
+                )
 
                 logger.info(
                     "Использую PO_SSID из "
@@ -549,6 +896,7 @@ class PocketMarket:
                     ssid = await self.auto_login()
 
                 except asyncio.CancelledError:
+
                     raise
 
                 except Exception as exc:
@@ -656,6 +1004,7 @@ class PocketMarket:
                         )
 
                     except asyncio.CancelledError:
+
                         raise
 
                     except Exception as health_exc:
@@ -665,10 +1014,6 @@ class PocketMarket:
                             "health-check не прошёл: %s",
                             health_exc,
                         )
-
-                        # Некоторые версии библиотеки
-                        # могут подключить WebSocket,
-                        # но balance ещё не успеть ответить.
 
                 else:
 
@@ -683,8 +1028,10 @@ class PocketMarket:
 
                 self.connected = True
 
-                self.last_success = datetime.now(
-                    timezone.utc
+                self.last_success = (
+                    datetime.now(
+                        timezone.utc
+                    )
                 )
 
                 self.last_error = None
@@ -709,6 +1056,7 @@ class PocketMarket:
                 return True
 
             except asyncio.CancelledError:
+
                 raise
 
             except Exception as exc:
@@ -751,12 +1099,14 @@ class PocketMarket:
     # ========================================================
 
     @staticmethod
-    def _timestamp(value: Any) -> datetime:
-        """
-        Преобразует timestamp/datetime в UTC datetime.
-        """
+    def _timestamp(
+        value: Any,
+    ) -> datetime:
 
-        if isinstance(value, datetime):
+        if isinstance(
+            value,
+            datetime,
+        ):
 
             if value.tzinfo is None:
 
@@ -776,9 +1126,10 @@ class PocketMarket:
 
         try:
 
-            numeric = float(value)
+            numeric = float(
+                value
+            )
 
-            # milliseconds
             if numeric > 10_000_000_000:
 
                 numeric /= 1000.0
@@ -805,7 +1156,10 @@ class PocketMarket:
         default: Any = None,
     ) -> Any:
 
-        if isinstance(item, dict):
+        if isinstance(
+            item,
+            dict,
+        ):
 
             for name in names:
 
@@ -843,10 +1197,6 @@ class PocketMarket:
         cls,
         item: Any,
     ) -> Candle | None:
-        """
-        Преобразует объект свечи BinaryOptionsToolsV2
-        в наш Candle.
-        """
 
         try:
 
@@ -909,11 +1259,21 @@ class PocketMarket:
                 time=cls._timestamp(
                     timestamp
                 ),
-                open=float(open_price),
-                high=float(high_price),
-                low=float(low_price),
-                close=float(close_price),
-                volume=float(volume or 0.0),
+                open=float(
+                    open_price
+                ),
+                high=float(
+                    high_price
+                ),
+                low=float(
+                    low_price
+                ),
+                close=float(
+                    close_price
+                ),
+                volume=float(
+                    volume or 0.0
+                ),
             )
 
             if (
@@ -921,6 +1281,20 @@ class PocketMarket:
                 or candle.high <= 0
                 or candle.low <= 0
                 or candle.close <= 0
+            ):
+
+                return None
+
+            if candle.high < max(
+                candle.open,
+                candle.close,
+            ):
+
+                return None
+
+            if candle.low > min(
+                candle.open,
+                candle.close,
             ):
 
                 return None
@@ -940,10 +1314,6 @@ class PocketMarket:
         cls,
         raw: Any,
     ) -> list[Candle]:
-        """
-        Извлекает свечи из различных форматов,
-        которые может вернуть библиотека.
-        """
 
         if raw is None:
 
@@ -953,7 +1323,10 @@ class PocketMarket:
         # Dict wrapper
         # ----------------------------------------------------
 
-        if isinstance(raw, dict):
+        if isinstance(
+            raw,
+            dict,
+        ):
 
             for key in (
                 "data",
@@ -969,7 +1342,6 @@ class PocketMarket:
                         raw[key]
                     )
 
-            # Одна свеча
             candle = cls._parse_candle(
                 raw
             )
@@ -1062,18 +1434,10 @@ class PocketMarket:
 
             return []
 
-        # ----------------------------------------------------
-        # Sort
-        # ----------------------------------------------------
-
         candles = sorted(
             candles,
             key=lambda c: c.time,
         )
-
-        # ----------------------------------------------------
-        # Remove duplicate timestamps
-        # ----------------------------------------------------
 
         unique: dict[
             datetime,
@@ -1111,11 +1475,6 @@ class PocketMarket:
                 "Pocket Option client не создан."
             )
 
-        # ----------------------------------------------------
-        # Возможные методы разных версий
-        # BinaryOptionsToolsV2
-        # ----------------------------------------------------
-
         methods = (
             "get_candles",
             "candles",
@@ -1133,11 +1492,8 @@ class PocketMarket:
             )
 
             if method is None:
-                continue
 
-            # ------------------------------------------------
-            # Несколько вариантов сигнатуры.
-            # ------------------------------------------------
+                continue
 
             attempts = [
                 (
@@ -1183,7 +1539,6 @@ class PocketMarket:
 
                 except TypeError:
 
-                    # Неподходящая сигнатура.
                     continue
 
                 except Exception as exc:
@@ -1194,7 +1549,6 @@ class PocketMarket:
                         exc,
                     )
 
-                    # Пробуем следующий вариант.
                     continue
 
         raise RuntimeError(
@@ -1212,22 +1566,6 @@ class PocketMarket:
         period: int = 60,
         count: int = 100,
     ) -> list[Candle]:
-        """
-        Получает свечи рынка.
-
-        asset:
-            EURUSD
-            EUR/USD
-            EURUSD_otc
-            EUR/USD OTC
-            и т.д.
-
-        period:
-            интервал свечи в секундах.
-
-        count:
-            количество свечей.
-        """
 
         if not self.is_connected:
 
@@ -1239,8 +1577,13 @@ class PocketMarket:
                 "asset не задан."
             )
 
-        period = int(period)
-        count = int(count)
+        period = int(
+            period
+        )
+
+        count = int(
+            count
+        )
 
         if period <= 0:
 
@@ -1254,10 +1597,6 @@ class PocketMarket:
                 "count должен быть > 0."
             )
 
-        # ----------------------------------------------------
-        # Запрос
-        # ----------------------------------------------------
-
         try:
 
             raw = await self._request_raw_candles(
@@ -1266,26 +1605,30 @@ class PocketMarket:
                 count=count,
             )
 
-            candles = self._extract_candles(
-                raw
+            candles = (
+                self._extract_candles(
+                    raw
+                )
             )
 
-            candles = self._normalize_candles(
-                candles
+            candles = (
+                self._normalize_candles(
+                    candles
+                )
             )
-
-            # ------------------------------------------------
-            # Ограничиваем count
-            # ------------------------------------------------
 
             if len(candles) > count:
 
-                candles = candles[-count:]
+                candles = candles[
+                    -count:
+                ]
 
             if candles:
 
-                self.last_success = datetime.now(
-                    timezone.utc
+                self.last_success = (
+                    datetime.now(
+                        timezone.utc
+                    )
                 )
 
                 self.last_error = None
@@ -1298,7 +1641,9 @@ class PocketMarket:
 
         except Exception as exc:
 
-            self.last_error = str(exc)
+            self.last_error = str(
+                exc
+            )
 
             logger.exception(
                 "Ошибка получения свечей %s: %s",
@@ -1361,16 +1706,13 @@ class PocketMarket:
             now - latest
         ).total_seconds()
 
-        # ----------------------------------------------------
-        # Если timestamp немного в будущем —
-        # считаем данные свежими.
-        # ----------------------------------------------------
-
         if age < 0:
 
             return True
 
-        return age <= max_age_seconds
+        return (
+            age <= max_age_seconds
+        )
 
     # ========================================================
     # TEST MARKET
@@ -1382,13 +1724,6 @@ class PocketMarket:
         period: int = 60,
         count: int = 10,
     ) -> bool:
-        """
-        Быстрая проверка:
-
-        1. Есть ли подключение.
-        2. Приходят ли свечи.
-        3. Есть ли валидные цены.
-        """
 
         try:
 
@@ -1416,6 +1751,16 @@ class PocketMarket:
                     and candle.high > 0
                     and candle.low > 0
                     and candle.close > 0
+                    and candle.high
+                    >= max(
+                        candle.open,
+                        candle.close,
+                    )
+                    and candle.low
+                    <= min(
+                        candle.open,
+                        candle.close,
+                    )
                 )
                 for candle in candles
             )
@@ -1443,7 +1788,9 @@ class PocketMarket:
 
         except Exception as exc:
 
-            self.last_error = str(exc)
+            self.last_error = str(
+                exc
+            )
 
             logger.exception(
                 "Market test failed: %s",
@@ -1456,12 +1803,18 @@ class PocketMarket:
     # MARKET STATUS
     # ========================================================
 
-    def status(self) -> dict[str, Any]:
+    def status(
+        self,
+    ) -> dict[str, Any]:
 
         return {
             "connected": self.connected,
-            "has_client": self.client is not None,
-            "has_ssid": bool(self.ssid),
+            "has_client": (
+                self.client is not None
+            ),
+            "has_ssid": bool(
+                self.ssid
+            ),
             "last_error": self.last_error,
             "last_success": (
                 self.last_success.isoformat()
@@ -1474,7 +1827,9 @@ class PocketMarket:
     # CLOSE
     # ========================================================
 
-    async def close(self) -> None:
+    async def close(
+        self,
+    ) -> None:
 
         async with self.lock:
 
@@ -1487,10 +1842,6 @@ class PocketMarket:
             if client is None:
 
                 return
-
-            # ------------------------------------------------
-            # Возможные методы закрытия
-            # ------------------------------------------------
 
             for method_name in (
                 "close",
@@ -1505,6 +1856,7 @@ class PocketMarket:
                 )
 
                 if method is None:
+
                     continue
 
                 try:
