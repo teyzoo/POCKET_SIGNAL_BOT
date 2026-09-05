@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -54,6 +55,72 @@ class PocketMarket:
         )
 
     # ========================================================
+    # PLAYWRIGHT CHECK
+    # ========================================================
+
+    @staticmethod
+    def _prepare_playwright_environment() -> None:
+        """
+        Подготовка окружения Playwright.
+
+        BinaryOptionsToolsV2 иногда пытается использовать
+        системный Google Chrome (/opt/google/chrome/chrome),
+        которого на Render может не быть.
+
+        Мы явно указываем стандартный каталог Playwright,
+        если он существует.
+        """
+
+        possible_paths = [
+            os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
+            "/opt/render/project/src/.cache/ms-playwright",
+            "/opt/render/project/.cache/ms-playwright",
+        ]
+
+        for path in possible_paths:
+            if path and os.path.isdir(path):
+                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = path
+
+                logger.info(
+                    "Playwright browsers path: %s",
+                    path,
+                )
+
+                break
+
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as p:
+                browser_type = p.chromium
+
+                executable = browser_type.executable_path
+
+                if executable:
+                    logger.info(
+                        "Playwright Chromium executable: %s",
+                        executable,
+                    )
+
+                    if os.path.exists(executable):
+                        logger.info(
+                            "Playwright Chromium найден."
+                        )
+                    else:
+                        logger.warning(
+                            "Playwright Chromium executable "
+                            "не найден по пути: %s",
+                            executable,
+                        )
+
+        except Exception as exc:
+            logger.warning(
+                "Не удалось предварительно проверить "
+                "Playwright Chromium: %s",
+                exc,
+            )
+
+    # ========================================================
     # AUTO LOGIN
     # ========================================================
 
@@ -65,9 +132,13 @@ class PocketMarket:
         Используется только если PO_SSID отсутствует.
 
         Важно:
-        автоматический login зависит от того,
+        автоматическая авторизация зависит от того,
         разрешает ли Pocket Option браузерную
         авторизацию из окружения Render.
+
+        Мы используем backend="playwright", чтобы
+        BinaryOptionsToolsV2 не выбирал системный Chrome
+        как основной backend.
         """
 
         if not config.po_email:
@@ -81,44 +152,112 @@ class PocketMarket:
             )
 
         logger.info(
-            "Запускаю автоматическую авторизацию Pocket Option..."
+            "Запускаю автоматическую авторизацию "
+            "Pocket Option через Playwright..."
         )
 
-        try:
-            from BinaryOptionsToolsV2.pocketoption.tools.login import (
-                login,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                "Не удалось импортировать Pocket Option login: "
-                f"{exc}"
-            ) from exc
+        # ----------------------------------------------------
+        # Подготовка Playwright
+        # ----------------------------------------------------
 
         try:
-            ssid = await asyncio.to_thread(
-                login,
-                config.po_email,
-                config.po_password,
-                demo=config.po_demo,
-                backend="auto",
-                headless=True,
-                timeout=60,
+            await asyncio.to_thread(
+                self._prepare_playwright_environment
             )
 
         except asyncio.CancelledError:
             raise
 
         except Exception as exc:
+            logger.warning(
+                "Проверка Playwright завершилась "
+                "с предупреждением: %s",
+                exc,
+            )
+
+        # ----------------------------------------------------
+        # Import login
+        # ----------------------------------------------------
+
+        try:
+            from BinaryOptionsToolsV2.pocketoption.tools.login import (
+                login,
+            )
+
+        except Exception as exc:
+            raise RuntimeError(
+                "Не удалось импортировать Pocket Option login: "
+                f"{exc}"
+            ) from exc
+
+        # ----------------------------------------------------
+        # Login
+        # ----------------------------------------------------
+
+        try:
+
+            ssid = await asyncio.to_thread(
+                login,
+                config.po_email,
+                config.po_password,
+                demo=config.po_demo,
+                backend="playwright",
+                headless=True,
+                timeout=90,
+            )
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception as exc:
+
             logger.exception(
                 "Pocket Option automatic login failed"
             )
+
+            error_text = str(exc)
+
+            # ------------------------------------------------
+            # Более понятные сообщения
+            # ------------------------------------------------
+
+            if "chrome is not found" in error_text.lower():
+
+                raise RuntimeError(
+                    "Playwright/BinaryOptionsToolsV2 "
+                    "не смог найти браузер Chrome. "
+                    "Проверь buildCommand Render: "
+                    "python -m playwright install "
+                    "--with-deps chromium firefox"
+                ) from exc
+
+            if "captcha" in error_text.lower():
+
+                raise RuntimeError(
+                    "Pocket Option потребовал CAPTCHA/"
+                    "дополнительную проверку. "
+                    "Автоматический вход остановлен."
+                ) from exc
+
+            if "firewall" in error_text.lower():
+
+                raise RuntimeError(
+                    "Pocket Option не удалось открыть "
+                    "из окружения Render. "
+                    "Возможна блокировка соединения."
+                ) from exc
 
             raise RuntimeError(
                 "Автоматическая авторизация Pocket Option "
                 f"не удалась: {exc}"
             ) from exc
 
+        # ----------------------------------------------------
+        # Validate SSID
+        # ----------------------------------------------------
+
         if not ssid:
+
             raise RuntimeError(
                 "Pocket Option login не вернул SSID."
             )
@@ -147,8 +286,14 @@ class PocketMarket:
 
         async with self.lock:
 
-            # Уже подключены.
-            if self.client is not None and self.connected:
+            # ------------------------------------------------
+            # Уже подключены
+            # ------------------------------------------------
+
+            if (
+                self.client is not None
+                and self.connected
+            ):
                 return True
 
             self.last_error = None
@@ -160,6 +305,7 @@ class PocketMarket:
             ssid = ""
 
             if config.po_ssid:
+
                 ssid = config.po_ssid.strip()
 
                 logger.info(
@@ -169,6 +315,7 @@ class PocketMarket:
             else:
 
                 if not config.po_auto_login:
+
                     raise RuntimeError(
                         "PO_SSID не задан, а "
                         "PO_AUTO_LOGIN выключен."
@@ -182,6 +329,7 @@ class PocketMarket:
                 ssid = await self.auto_login()
 
             if not ssid:
+
                 raise RuntimeError(
                     "Не удалось получить Pocket Option SSID."
                 )
@@ -191,11 +339,13 @@ class PocketMarket:
             # ------------------------------------------------
 
             try:
+
                 from BinaryOptionsToolsV2.pocketoption import (
                     PocketOptionAsync,
                 )
 
             except Exception as exc:
+
                 raise RuntimeError(
                     "BinaryOptionsToolsV2 не импортируется: "
                     f"{exc}"
@@ -216,7 +366,9 @@ class PocketMarket:
                 self.client = client
                 self.ssid = ssid
 
-                # Даём WebSocket время инициализироваться.
+                # Даём WebSocket время
+                # инициализироваться.
+
                 await asyncio.sleep(5)
 
                 # ------------------------------------------------
@@ -233,10 +385,14 @@ class PocketMarket:
 
                     if balance_method is not None:
 
-                        await asyncio.wait_for(
-                            balance_method(),
-                            timeout=15,
-                        )
+                        result = balance_method()
+
+                        if asyncio.iscoroutine(result):
+
+                            await asyncio.wait_for(
+                                result,
+                                timeout=15,
+                            )
 
                         logger.info(
                             "Pocket Option connection "
@@ -334,6 +490,7 @@ class PocketMarket:
         if isinstance(value, datetime):
 
             if value.tzinfo is None:
+
                 return value.replace(
                     tzinfo=timezone.utc
                 )
@@ -356,6 +513,7 @@ class PocketMarket:
                 )
 
                 if dt.tzinfo is None:
+
                     dt = dt.replace(
                         tzinfo=timezone.utc
                     )
@@ -365,12 +523,15 @@ class PocketMarket:
                 )
 
             except ValueError:
+
                 value = float(text)
 
         number = float(value)
 
         # milliseconds -> seconds
+
         if number > 10_000_000_000:
+
             number /= 1000.0
 
         return datetime.fromtimestamp(
@@ -390,6 +551,7 @@ class PocketMarket:
     ) -> Any:
 
         if isinstance(item, dict):
+
             return item.get(
                 name,
                 default,
@@ -418,12 +580,14 @@ class PocketMarket:
             )
 
             if timestamp is None:
+
                 timestamp = self._read(
                     item,
                     "timestamp",
                 )
 
             if timestamp is None:
+
                 timestamp = self._read(
                     item,
                     "from",
@@ -490,6 +654,7 @@ class PocketMarket:
             )
 
             # NaN / infinity
+
             if not all(
                 x == x
                 and abs(x) != float("inf")
@@ -498,6 +663,7 @@ class PocketMarket:
                 return None
 
             # OHLC validation
+
             if candle.high < max(
                 candle.open,
                 candle.close,
@@ -528,6 +694,7 @@ class PocketMarket:
             return candle
 
         except Exception:
+
             return None
 
     # ========================================================
@@ -543,9 +710,6 @@ class PocketMarket:
             1,
             int(timeframe),
         )
-
-        # SignalEngine использует историю
-        # выбранного timeframe.
 
         required = (
             timeframe * 60
@@ -582,14 +746,14 @@ class PocketMarket:
         bucket: list[Candle] = []
         bucket_start: datetime | None = None
 
+        bucket_seconds = (
+            timeframe * 60
+        )
+
         for candle in candles:
 
             timestamp = int(
                 candle.time.timestamp()
-            )
-
-            bucket_seconds = (
-                timeframe * 60
             )
 
             current_bucket = (
@@ -607,6 +771,7 @@ class PocketMarket:
             ):
 
                 if bucket:
+
                     result.append(
                         Candle(
                             time=bucket_start,
@@ -632,7 +797,10 @@ class PocketMarket:
 
             bucket.append(candle)
 
-        if bucket and bucket_start is not None:
+        if (
+            bucket
+            and bucket_start is not None
+        ):
 
             result.append(
                 Candle(
@@ -667,6 +835,7 @@ class PocketMarket:
     ):
 
         if self.client is None:
+
             raise RuntimeError(
                 "Pocket Option client не подключён."
             )
@@ -711,6 +880,7 @@ class PocketMarket:
                 )
 
                 if not first:
+
                     raise RuntimeError(
                         "LIVE stream не вернул данные."
                     )
@@ -737,6 +907,7 @@ class PocketMarket:
                     closed = first
 
                 else:
+
                     closed = first
 
                 logger.info(
@@ -746,6 +917,7 @@ class PocketMarket:
                 )
 
                 if closed:
+
                     return closed
 
                 logger.warning(
@@ -775,6 +947,7 @@ class PocketMarket:
         )
 
         if get_method is None:
+
             raise RuntimeError(
                 "PocketOptionAsync не содержит "
                 "get_candles()."
@@ -804,6 +977,7 @@ class PocketMarket:
             )
 
             if not raw:
+
                 raise RuntimeError(
                     "get_candles() вернул пустой результат."
                 )
@@ -843,6 +1017,7 @@ class PocketMarket:
             ):
 
                 if key in raw:
+
                     return raw[key]
 
         return raw
@@ -863,9 +1038,11 @@ class PocketMarket:
         # ----------------------------------------------------
 
         if not self.is_connected:
+
             await self.connect()
 
         if self.client is None:
+
             raise RuntimeError(
                 "Pocket Option client отсутствует."
             )
@@ -883,9 +1060,11 @@ class PocketMarket:
             if pair.endswith(
                 "_otc"
             ):
+
                 symbol = pair
 
             else:
+
                 raise ValueError(
                     f"Неизвестная OTC-пара: {pair}"
                 )
@@ -1014,6 +1193,7 @@ class PocketMarket:
             )
 
             if candle is not None:
+
                 parsed.append(
                     candle
                 )
@@ -1028,6 +1208,7 @@ class PocketMarket:
         ] = {}
 
         for candle in parsed:
+
             unique[candle.time] = candle
 
         result = sorted(
@@ -1103,6 +1284,7 @@ class PocketMarket:
         )
 
         # Не допускаем старые данные.
+
         if age > 180:
 
             raise RuntimeError(
@@ -1112,6 +1294,7 @@ class PocketMarket:
             )
 
         # Не допускаем слишком далёкое будущее.
+
         if age < -30:
 
             raise RuntimeError(
@@ -1138,10 +1321,12 @@ class PocketMarket:
                     f"осталось только {len(result)} свечей."
                 )
 
-            result = result[-max(
-                60,
-                limit // minutes,
-            ):]
+            result = result[
+                -max(
+                    60,
+                    limit // minutes,
+                ):
+            ]
 
         # ----------------------------------------------------
         # Success
@@ -1225,6 +1410,7 @@ class PocketMarket:
         )
 
         if not candles:
+
             raise RuntimeError(
                 "Рынок вернул пустые данные."
             )
