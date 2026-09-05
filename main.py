@@ -83,6 +83,9 @@ LAST_KEYS: set[str] = set()
 
 USER_ANALYSIS_LOCKS: dict[int, asyncio.Lock] = {}
 
+MARKET_READY = False
+MARKET_CONNECT_LOCK = asyncio.Lock()
+
 
 # ============================================================
 # FASTAPI
@@ -112,6 +115,7 @@ async def health():
     return {
         "status": "healthy",
         "service": "POCKET_SIGNAL_BOT",
+        "market_connected": MARKET_READY,
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -348,28 +352,27 @@ async def safe_edit(
     reply_markup: Optional[InlineKeyboardMarkup] = None,
 ):
     try:
-        await callback.message.edit_text(
-            text,
-            reply_markup=reply_markup,
-        )
+        if callback.message:
+            await callback.message.edit_text(
+                text,
+                reply_markup=reply_markup,
+            )
+            return
     except Exception:
-        try:
+        pass
+
+    try:
+        if callback.message:
             await callback.message.answer(
                 text,
                 reply_markup=reply_markup,
             )
-        except Exception:
-            logger.exception(
-                "Could not edit/send message"
-            )
+    except Exception:
+        logger.exception("Could not edit/send message")
 
 
 def format_signal(signal) -> str:
-    reasons = getattr(
-        signal,
-        "reasons",
-        None,
-    ) or []
+    reasons = getattr(signal, "reasons", None) or []
 
     reasons_text = ""
 
@@ -388,9 +391,9 @@ def format_signal(signal) -> str:
         f"⏱ <b>Экспирация:</b> "
         f"{signal.timeframe} мин\n"
         f"🎯 <b>Вероятность:</b> "
-        f"{signal.probability:.1f}%\n"
+        f"{float(signal.probability):.1f}%\n"
         f"⭐ <b>Quality Score:</b> "
-        f"{signal.quality:.1f}/100\n\n"
+        f"{float(signal.quality):.1f}/100\n\n"
         f"🕐 <b>Вход:</b> "
         f"{signal.entry_time.strftime('%H:%M:%S')} UTC\n"
         f"⏰ <b>Закрытие:</b> "
@@ -411,6 +414,67 @@ def format_signal(signal) -> str:
     )
 
     return text
+
+
+# ============================================================
+# MARKET CONNECTION
+# ============================================================
+
+async def connect_market_with_retry():
+    """
+    Подключение к Pocket Option не должно блокировать
+    запуск FastAPI/Render.
+
+    HTTP-сервер уже запущен отдельно.
+    """
+
+    global MARKET_READY
+
+    async with MARKET_CONNECT_LOCK:
+
+        if MARKET_READY:
+            return True
+
+        delay = 5
+
+        while True:
+            try:
+                logger.info(
+                    "Connecting to Pocket Option..."
+                )
+
+                await market.connect()
+
+                MARKET_READY = True
+
+                logger.info(
+                    "Pocket Option market connected"
+                )
+
+                return True
+
+            except asyncio.CancelledError:
+                raise
+
+            except Exception as exc:
+                MARKET_READY = False
+
+                logger.exception(
+                    "Pocket Option connection failed: %s",
+                    exc,
+                )
+
+                logger.warning(
+                    "Retrying Pocket Option connection in %s seconds",
+                    delay,
+                )
+
+                await asyncio.sleep(delay)
+
+                delay = min(
+                    delay * 2,
+                    60,
+                )
 
 
 # ============================================================
@@ -460,6 +524,13 @@ async def back_main(callback: CallbackQuery):
 async def signal_menu(callback: CallbackQuery):
     await callback.answer()
 
+    market_status = (
+        "🟢 Рыночный источник подключён."
+        if MARKET_READY
+        else
+        "🟡 Рыночный источник ещё подключается."
+    )
+
     await safe_edit(
         callback,
         (
@@ -467,11 +538,16 @@ async def signal_menu(callback: CallbackQuery):
             "💱 <b>Выбери OTC-пару:</b>\n\n"
             "🌐 <b>ЛЮБАЯ ПАРА</b>\n"
             "Бот проверит доступные OTC-пары "
-            "и выберет лучший результат."
+            "и выберет лучший результат.\n\n"
+            f"{market_status}"
         ),
         signal_pair_keyboard(),
     )
 
+
+# ============================================================
+# SIGNAL — PAIR SELECTED
+# ============================================================
 
 @dp.callback_query(F.data.startswith("sigp:"))
 async def signal_pair_selected(
@@ -489,6 +565,7 @@ async def signal_pair_selected(
     if selected_pair == "ANY":
         display_pair = "🌐 Любая пара"
         database_pair = "ANY"
+
     else:
         valid_pairs = {
             symbol
@@ -569,6 +646,7 @@ async def signal_time_selected(
     # --------------------------------------------------------
 
     if selected_time == "ANY":
+
         selected_times = list(
             config.timeframes
         )
@@ -576,27 +654,34 @@ async def signal_time_selected(
         selected_time_text = "🌐 Любое время"
 
     else:
+
         try:
             timeframe = int(
                 selected_time
             )
         except ValueError:
+
             await safe_edit(
                 callback,
                 "❌ Некорректное время.",
                 main_keyboard(),
             )
+
             return
 
         if timeframe not in config.timeframes:
+
             await safe_edit(
                 callback,
                 "❌ Такое время недоступно.",
                 main_keyboard(),
             )
+
             return
 
-        selected_times = [timeframe]
+        selected_times = [
+            timeframe
+        ]
 
         selected_time_text = (
             timeframe_text(timeframe)
@@ -607,6 +692,7 @@ async def signal_time_selected(
     # --------------------------------------------------------
 
     if selected_pair == "ANY":
+
         selected_pairs = [
             symbol
             for _, symbol in config.pairs
@@ -617,17 +703,20 @@ async def signal_time_selected(
         )
 
     else:
+
         valid_pairs = {
             symbol
             for _, symbol in config.pairs
         }
 
         if selected_pair not in valid_pairs:
+
             await safe_edit(
                 callback,
                 "❌ Некорректная OTC-пара.",
                 main_keyboard(),
             )
+
             return
 
         selected_pairs = [
@@ -645,6 +734,7 @@ async def signal_time_selected(
     lock = get_user_lock(user_id)
 
     if lock.locked():
+
         await safe_edit(
             callback,
             (
@@ -653,6 +743,7 @@ async def signal_time_selected(
             ),
             main_keyboard(),
         )
+
         return
 
     async with lock:
@@ -676,13 +767,71 @@ async def signal_time_selected(
                 f"{selected_pair_text}\n"
                 f"⏱ <b>Время:</b> "
                 f"{selected_time_text}\n\n"
-                "📡 Подключение к рыночным данным...\n"
-                "📊 Получение свечей...\n"
+                "📡 Получение реальных рыночных данных...\n"
+                "📊 Проверка свечей...\n"
                 "🧮 Подготовка индикаторов...\n"
                 f"📡 <b>Проверено:</b> "
                 f"0/{total}"
             ),
         )
+
+        # ----------------------------------------------------
+        # ENSURE MARKET CONNECTION
+        # ----------------------------------------------------
+
+        if not MARKET_READY:
+
+            try:
+                await safe_edit(
+                    callback,
+                    (
+                        "🔌 <b>ПОДКЛЮЧЕНИЕ К OTC</b>\n\n"
+                        "Рыночный источник ещё подключается.\n"
+                        "Пробую установить соединение..."
+                    ),
+                )
+
+                await asyncio.wait_for(
+                    connect_market_with_retry(),
+                    timeout=35,
+                )
+
+            except asyncio.TimeoutError:
+
+                await safe_edit(
+                    callback,
+                    (
+                        "⚠️ <b>РЫНОЧНЫЕ ДАННЫЕ "
+                        "НЕ ПОЛУЧЕНЫ</b>\n\n"
+                        "Pocket Option не удалось подключить "
+                        "за отведённое время.\n\n"
+                        "Сигнал <b>НЕ сформирован</b>."
+                    ),
+                    main_keyboard(),
+                )
+
+                return
+
+            except Exception as exc:
+
+                logger.exception(
+                    "Market connection failed: %s",
+                    exc,
+                )
+
+                await safe_edit(
+                    callback,
+                    (
+                        "⚠️ <b>РЫНОЧНЫЕ ДАННЫЕ "
+                        "НЕ ПОЛУЧЕНЫ</b>\n\n"
+                        "Не удалось подключить "
+                        "рыночный источник.\n\n"
+                        "Сигнал <b>НЕ сформирован</b>."
+                    ),
+                    main_keyboard(),
+                )
+
+                return
 
         # ----------------------------------------------------
         # REAL MARKET ANALYSIS
@@ -716,6 +865,7 @@ async def signal_time_selected(
                 )
 
                 try:
+
                     candles = await market.candles(
                         pair,
                         minutes=1,
@@ -723,6 +873,7 @@ async def signal_time_selected(
                     )
 
                     if not candles:
+
                         raise RuntimeError(
                             "Pocket Option returned no candles"
                         )
@@ -754,9 +905,11 @@ async def signal_time_selected(
                     if signal is not None:
 
                         if best_signal is None:
+
                             best_signal = signal
 
                         else:
+
                             current_quality = float(
                                 getattr(
                                     signal,
@@ -777,12 +930,14 @@ async def signal_time_selected(
                                 current_quality
                                 > best_quality
                             ):
+
                                 best_signal = signal
 
                 except asyncio.CancelledError:
                     raise
 
                 except Exception as exc:
+
                     market_errors += 1
 
                     logger.warning(
@@ -854,12 +1009,14 @@ async def signal_time_selected(
         # ----------------------------------------------------
 
         try:
+
             await save_signal(
                 user_id=user_id,
                 signal=best_signal,
             )
 
         except Exception:
+
             logger.exception(
                 "Could not save manual signal"
             )
@@ -890,6 +1047,7 @@ async def settings_handler(
     )
 
     if not user:
+
         await ensure_user(
             telegram_id=callback.from_user.id,
             username=callback.from_user.username,
@@ -912,8 +1070,11 @@ async def settings_handler(
     ) or 1
 
     if current_pair == "ANY":
+
         display_pair = "🌐 Любая пара"
+
     else:
+
         display_pair = pair_name(
             current_pair
         )
@@ -922,6 +1083,12 @@ async def settings_handler(
         "🟢 Включены"
         if AUTO_SIGNALS
         else "🔴 Выключены"
+    )
+
+    market_text = (
+        "🟢 Подключён"
+        if MARKET_READY
+        else "🟡 Подключение"
     )
 
     await safe_edit(
@@ -933,6 +1100,7 @@ async def settings_handler(
             f"<b>{current_timeframe} мин</b>\n"
             f"🤖 Автосигналы: "
             f"<b>{auto_text}</b>\n"
+            f"📡 OTC: <b>{market_text}</b>\n"
             f"⭐ Минимальный Quality: "
             f"<b>{config.MIN_SIGNAL_SCORE:.1f}</b>\n"
             f"🎯 Минимальная вероятность: "
@@ -1020,6 +1188,7 @@ async def owner_users(
         return
 
     try:
+
         users = await get_access_users()
 
         await safe_edit(
@@ -1033,6 +1202,7 @@ async def owner_users(
         )
 
     except Exception as exc:
+
         logger.exception(
             "owner_users failed"
         )
@@ -1061,6 +1231,7 @@ async def owner_stats(
         return
 
     try:
+
         stats = await get_signal_stats()
 
         await safe_edit(
@@ -1082,6 +1253,7 @@ async def owner_stats(
         )
 
     except Exception as exc:
+
         logger.exception(
             "owner_stats failed"
         )
@@ -1110,22 +1282,26 @@ async def owner_signals(
         return
 
     try:
+
         signals = await get_recent_signals(
             limit=10
         )
 
         if not signals:
+
             text = (
                 "📈 <b>ПОСЛЕДНИЕ СИГНАЛЫ</b>\n\n"
                 "Сигналов пока нет."
             )
 
         else:
+
             lines = [
                 "📈 <b>ПОСЛЕДНИЕ СИГНАЛЫ</b>\n"
             ]
 
             for signal in signals:
+
                 pair = getattr(
                     signal,
                     "pair",
@@ -1176,6 +1352,7 @@ async def owner_signals(
         )
 
     except Exception as exc:
+
         logger.exception(
             "owner_signals failed"
         )
@@ -1204,6 +1381,7 @@ async def owner_pairs(
         return
 
     try:
+
         stats = await get_pair_stats()
 
         lines = [
@@ -1211,14 +1389,17 @@ async def owner_pairs(
         ]
 
         if not stats:
+
             lines.append(
                 "Пока нет завершённых сигналов."
             )
 
         else:
+
             for row in stats:
 
                 if isinstance(row, dict):
+
                     pair = row.get(
                         "pair",
                         "?",
@@ -1245,6 +1426,7 @@ async def owner_pairs(
                     )
 
                 else:
+
                     pair = getattr(
                         row,
                         "pair",
@@ -1280,7 +1462,8 @@ async def owner_pairs(
                     f"Всего: {total}\n"
                     f"WIN: {wins}\n"
                     f"LOSS: {losses}\n"
-                    f"WINRATE: {float(winrate):.2f}%"
+                    f"WINRATE: "
+                    f"{float(winrate):.2f}%"
                 )
 
         await safe_edit(
@@ -1290,6 +1473,7 @@ async def owner_pairs(
         )
 
     except Exception as exc:
+
         logger.exception(
             "owner_pairs failed"
         )
@@ -1350,6 +1534,7 @@ async def my_stats(
     await callback.answer()
 
     try:
+
         stats = await get_user_stats(
             callback.from_user.id
         )
@@ -1373,6 +1558,7 @@ async def my_stats(
         )
 
     except Exception as exc:
+
         logger.exception(
             "my_stats failed"
         )
@@ -1395,6 +1581,7 @@ async def scan_one_pair(
     pair: str,
     timeframe: int,
 ):
+
     candles = await market.candles(
         pair,
         minutes=1,
@@ -1402,6 +1589,7 @@ async def scan_one_pair(
     )
 
     if not candles:
+
         raise RuntimeError(
             f"No candles for {pair}"
         )
@@ -1414,6 +1602,7 @@ async def scan_one_pair(
 
 
 async def auto_scanner_loop():
+
     global LAST_KEYS
 
     logger.info(
@@ -1425,28 +1614,58 @@ async def auto_scanner_loop():
         try:
 
             if not AUTO_SIGNALS:
+
                 await asyncio.sleep(
                     max(
                         5,
                         config.SCAN_INTERVAL,
                     )
                 )
+
                 continue
 
             users = await get_access_users()
 
             if not users:
+
                 await asyncio.sleep(
                     max(
                         5,
                         config.SCAN_INTERVAL,
                     )
                 )
+
                 continue
+
+            if not MARKET_READY:
+
+                try:
+                    await asyncio.wait_for(
+                        connect_market_with_retry(),
+                        timeout=20,
+                    )
+
+                except Exception as exc:
+
+                    logger.warning(
+                        "Auto scanner market "
+                        "connection unavailable: %s",
+                        exc,
+                    )
+
+                    await asyncio.sleep(
+                        max(
+                            10,
+                            config.SCAN_INTERVAL,
+                        )
+                    )
+
+                    continue
 
             for user in users:
 
                 try:
+
                     user_id = getattr(
                         user,
                         "telegram_id",
@@ -1469,6 +1688,7 @@ async def auto_scanner_loop():
                     ) or 1
 
                     if selected_pair == "ANY":
+
                         pairs = [
                             symbol
                             for _, symbol
@@ -1476,6 +1696,7 @@ async def auto_scanner_loop():
                         ]
 
                     else:
+
                         pairs = [
                             selected_pair
                         ]
@@ -1485,6 +1706,7 @@ async def auto_scanner_loop():
                     for pair in pairs:
 
                         try:
+
                             signal = await scan_one_pair(
                                 pair,
                                 int(timeframe),
@@ -1494,9 +1716,11 @@ async def auto_scanner_loop():
                                 continue
 
                             if best_signal is None:
+
                                 best_signal = signal
 
                             else:
+
                                 signal_quality = float(
                                     getattr(
                                         signal,
@@ -1517,12 +1741,14 @@ async def auto_scanner_loop():
                                     signal_quality
                                     > best_quality
                                 ):
+
                                     best_signal = signal
 
                         except asyncio.CancelledError:
                             raise
 
                         except Exception as exc:
+
                             logger.warning(
                                 "Auto scan failed "
                                 "user=%s pair=%s: %s",
@@ -1536,9 +1762,9 @@ async def auto_scanner_loop():
                     if best_signal is None:
                         continue
 
-                    # --------------------------------------------
+                    # ------------------------------------------------
                     # DUPLICATE PROTECTION
-                    # --------------------------------------------
+                    # ------------------------------------------------
 
                     key = (
                         f"{user_id}:"
@@ -1554,30 +1780,34 @@ async def auto_scanner_loop():
                     LAST_KEYS.add(key)
 
                     if len(LAST_KEYS) > 5000:
+
                         LAST_KEYS = set(
                             list(LAST_KEYS)[-2500:]
                         )
 
-                    # --------------------------------------------
+                    # ------------------------------------------------
                     # SAVE
-                    # --------------------------------------------
+                    # ------------------------------------------------
 
                     try:
+
                         await save_signal(
                             user_id=user_id,
                             signal=best_signal,
                         )
 
                     except Exception:
+
                         logger.exception(
                             "Could not save auto signal"
                         )
 
-                    # --------------------------------------------
+                    # ------------------------------------------------
                     # SEND
-                    # --------------------------------------------
+                    # ------------------------------------------------
 
                     try:
+
                         await bot.send_message(
                             user_id,
                             format_signal(
@@ -1586,6 +1816,7 @@ async def auto_scanner_loop():
                         )
 
                     except Exception:
+
                         logger.exception(
                             "Could not send auto signal "
                             "user=%s",
@@ -1596,6 +1827,7 @@ async def auto_scanner_loop():
                     raise
 
                 except Exception:
+
                     logger.exception(
                         "Auto scanner user iteration failed"
                     )
@@ -1608,12 +1840,15 @@ async def auto_scanner_loop():
             )
 
         except asyncio.CancelledError:
+
             logger.info(
                 "Auto scanner cancelled"
             )
+
             raise
 
         except Exception:
+
             logger.exception(
                 "Auto scanner loop error"
             )
@@ -1631,6 +1866,7 @@ async def auto_scanner_loop():
 # ============================================================
 
 async def result_checker_loop():
+
     logger.info(
         "Result checker started"
     )
@@ -1638,15 +1874,19 @@ async def result_checker_loop():
     while True:
 
         try:
+
             await mark_expired_signals()
 
         except asyncio.CancelledError:
+
             logger.info(
                 "Result checker cancelled"
             )
+
             raise
 
         except Exception:
+
             logger.exception(
                 "Result checker failed"
             )
@@ -1655,63 +1895,10 @@ async def result_checker_loop():
 
 
 # ============================================================
-# START BOT
+# FASTAPI SERVER
 # ============================================================
 
-async def start_bot():
-
-    logger.info(
-        "Starting Pocket Option Signal Bot..."
-    )
-
-    # --------------------------------------------------------
-    # DATABASE
-    # --------------------------------------------------------
-
-    await init_db()
-
-    logger.info(
-        "Database initialized"
-    )
-
-    # --------------------------------------------------------
-    # MARKET
-    # --------------------------------------------------------
-
-    try:
-        await market.connect()
-
-        logger.info(
-            "Pocket Option market connected"
-        )
-
-    except Exception as exc:
-        logger.exception(
-            "Initial Pocket Option connection failed: %s",
-            exc,
-        )
-
-        logger.warning(
-            "Bot continues running. "
-            "Market connection will be retried "
-            "when market data is requested."
-        )
-
-    # --------------------------------------------------------
-    # BACKGROUND TASKS
-    # --------------------------------------------------------
-
-    scanner_task = asyncio.create_task(
-        auto_scanner_loop()
-    )
-
-    result_task = asyncio.create_task(
-        result_checker_loop()
-    )
-
-    # --------------------------------------------------------
-    # FASTAPI
-    # --------------------------------------------------------
+async def run_api_server():
 
     port = int(
         os.environ.get(
@@ -1720,24 +1907,31 @@ async def start_bot():
         )
     )
 
+    logger.info(
+        "Starting FastAPI on 0.0.0.0:%s",
+        port,
+    )
+
     uvicorn_config = uvicorn.Config(
         app,
         host="0.0.0.0",
         port=port,
         log_level="info",
+        access_log=True,
     )
 
     server = uvicorn.Server(
         uvicorn_config
     )
 
-    api_task = asyncio.create_task(
-        server.serve()
-    )
+    await server.serve()
 
-    # --------------------------------------------------------
-    # TELEGRAM
-    # --------------------------------------------------------
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+async def run_telegram():
 
     logger.info(
         "Telegram polling starting..."
@@ -1745,10 +1939,137 @@ async def start_bot():
 
     try:
 
-        await dp.start_polling(
-            bot,
-            allowed_updates=dp.resolve_used_update_types(),
+        await bot.delete_webhook(
+            drop_pending_updates=True,
         )
+
+    except Exception:
+
+        logger.exception(
+            "Could not delete webhook"
+        )
+
+    await dp.start_polling(
+        bot,
+        allowed_updates=dp.resolve_used_update_types(),
+    )
+
+
+# ============================================================
+# APPLICATION START
+# ============================================================
+
+async def start_bot():
+
+    global MARKET_READY
+
+    logger.info(
+        "Starting Pocket Option Signal Bot..."
+    )
+
+    # ========================================================
+    # DATABASE
+    # ========================================================
+
+    try:
+
+        await init_db()
+
+        logger.info(
+            "Database initialized"
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Database initialization failed"
+        )
+
+        raise
+
+    # ========================================================
+    # START HTTP SERVER IMMEDIATELY
+    # ========================================================
+
+    api_task = asyncio.create_task(
+        run_api_server(),
+        name="fastapi-server",
+    )
+
+    # Give Uvicorn a moment to bind the port.
+    await asyncio.sleep(0.2)
+
+    logger.info(
+        "FastAPI task started"
+    )
+
+    # ========================================================
+    # MARKET CONNECTION IN BACKGROUND
+    # ========================================================
+
+    market_task = asyncio.create_task(
+        connect_market_with_retry(),
+        name="market-connection",
+    )
+
+    # ========================================================
+    # BACKGROUND TASKS
+    # ========================================================
+
+    scanner_task = asyncio.create_task(
+        auto_scanner_loop(),
+        name="auto-scanner",
+    )
+
+    result_task = asyncio.create_task(
+        result_checker_loop(),
+        name="result-checker",
+    )
+
+    # ========================================================
+    # TELEGRAM
+    # ========================================================
+
+    telegram_task = asyncio.create_task(
+        run_telegram(),
+        name="telegram-polling",
+    )
+
+    tasks = [
+        api_task,
+        market_task,
+        scanner_task,
+        result_task,
+        telegram_task,
+    ]
+
+    try:
+
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+
+        for task in done:
+
+            exception = task.exception()
+
+            if exception is not None:
+
+                logger.error(
+                    "Application task failed: %s",
+                    task.get_name(),
+                )
+
+                raise exception
+
+    except asyncio.CancelledError:
+
+        logger.info(
+            "Application cancelled"
+        )
+
+        raise
 
     finally:
 
@@ -1756,58 +2077,67 @@ async def start_bot():
             "Stopping Pocket Option Signal Bot..."
         )
 
-        scanner_task.cancel()
-        result_task.cancel()
-        api_task.cancel()
+        for task in tasks:
 
-        for task in (
-            scanner_task,
-            result_task,
-            api_task,
-        ):
+            if not task.done():
+                task.cancel()
+
+        for task in tasks:
+
             try:
+
                 await task
 
             except asyncio.CancelledError:
                 pass
 
             except Exception:
+
                 logger.exception(
-                    "Background task shutdown error"
+                    "Background task shutdown error: %s",
+                    task.get_name(),
                 )
 
-        # ----------------------------------------------------
+        # ====================================================
         # MARKET CLOSE
-        # ----------------------------------------------------
+        # ====================================================
 
         try:
+
             await market.close()
 
         except Exception:
+
             logger.exception(
                 "Market close failed"
             )
 
-        # ----------------------------------------------------
+        MARKET_READY = False
+
+        # ====================================================
         # BOT CLOSE
-        # ----------------------------------------------------
+        # ====================================================
 
         try:
+
             await bot.session.close()
 
         except Exception:
+
             logger.exception(
                 "Bot session close failed"
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # DATABASE CLOSE
-        # ----------------------------------------------------
+        # ====================================================
 
         try:
+
             await close_database()
 
         except Exception:
+
             logger.exception(
                 "Database close failed"
             )
@@ -1824,16 +2154,19 @@ async def start_bot():
 if __name__ == "__main__":
 
     try:
+
         asyncio.run(
             start_bot()
         )
 
     except KeyboardInterrupt:
+
         logger.info(
             "Stopped by keyboard interrupt"
         )
 
     except Exception:
+
         logger.exception(
             "Fatal application error"
         )
