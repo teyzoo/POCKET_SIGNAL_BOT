@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -29,14 +30,21 @@ from sqlalchemy.orm import (
 from config import config
 
 
+logger = logging.getLogger(
+    "pocket_database"
+)
+
+
 engine = create_async_engine(
     config.database_url,
     pool_pre_ping=True,
+    pool_recycle=1800,
 )
 
 Session = async_sessionmaker(
     engine,
     expire_on_commit=False,
+    class_=AsyncSession,
 )
 
 
@@ -161,7 +169,7 @@ async def init_db():
             Base.metadata.create_all
         )
 
-        # Fix old PostgreSQL INTEGER Telegram IDs automatically.
+        # Исправление старого INTEGER Telegram ID.
         if "postgresql" in config.database_url:
 
             await connection.exec_driver_sql(
@@ -261,19 +269,20 @@ async def update_user(
             )
         ).scalar_one_or_none()
 
-        if user:
+        if not user:
+            return
 
-            for key, value in values.items():
+        for key, value in values.items():
 
-                if hasattr(user, key):
+            if hasattr(user, key):
 
-                    setattr(
-                        user,
-                        key,
-                        value,
-                    )
+                setattr(
+                    user,
+                    key,
+                    value,
+                )
 
-            await session.commit()
+        await session.commit()
 
 
 async def get_access_users() -> list[User]:
@@ -282,8 +291,8 @@ async def get_access_users() -> list[User]:
 
         result = await session.execute(
             select(User).where(
-                User.access == True,
-                User.blocked == False,
+                User.access.is_(True),
+                User.blocked.is_(False),
             )
         )
 
@@ -314,6 +323,7 @@ async def save_signal(
             entry_time=entry_time,
             close_time=close_time,
             status="PENDING",
+            result=None,
             reasons=json.dumps(
                 reasons,
                 ensure_ascii=False,
@@ -329,18 +339,72 @@ async def save_signal(
 
 async def mark_expired_signals():
 
+    """
+    Переводит истёкшие PENDING сигналы в EXPIRED.
+
+    WIN/LOSS здесь специально не придумываем:
+    для настоящего результата необходимо сравнить
+    цену закрытия с направлением сигнала.
+
+    Пока EXPIRED используется как состояние,
+    чтобы один и тот же сигнал не обрабатывался повторно.
+    """
+
     now = datetime.now(timezone.utc)
 
     async with Session() as session:
 
-        await session.execute(
+        result = await session.execute(
             select(Signal).where(
                 Signal.status == "PENDING",
                 Signal.close_time <= now,
             )
         )
 
+        signals = list(
+            result.scalars().all()
+        )
+
+        for signal in signals:
+
+            signal.status = "EXPIRED"
+
         await session.commit()
+
+        return len(signals)
+
+
+async def set_signal_result(
+    signal_id: int,
+    result: str,
+):
+
+    result = result.upper().strip()
+
+    if result not in {
+        "WIN",
+        "LOSS",
+    }:
+        raise ValueError(
+            "Результат должен быть WIN или LOSS."
+        )
+
+    async with Session() as session:
+
+        signal = await session.get(
+            Signal,
+            signal_id,
+        )
+
+        if not signal:
+            return False
+
+        signal.result = result
+        signal.status = result
+
+        await session.commit()
+
+        return True
 
 
 async def get_signal_stats():
@@ -391,6 +455,7 @@ async def get_signal_stats():
             "wins": wins,
             "losses": losses,
             "winrate": winrate,
+            "decided": decided,
         }
 
 
@@ -412,8 +477,19 @@ async def get_user_stats():
                 select(
                     func.count(User.id)
                 ).where(
-                    User.auto_signals == True,
-                    User.blocked == False,
+                    User.auto_signals.is_(True),
+                    User.blocked.is_(False),
+                )
+            )
+            or 0
+        )
+
+        blocked = (
+            await session.scalar(
+                select(
+                    func.count(User.id)
+                ).where(
+                    User.blocked.is_(True)
                 )
             )
             or 0
@@ -422,12 +498,21 @@ async def get_user_stats():
         return {
             "total": total,
             "active": active,
+            "blocked": blocked,
         }
 
 
 async def get_recent_signals(
     limit: int = 10,
 ):
+
+    limit = max(
+        1,
+        min(
+            limit,
+            100,
+        ),
+    )
 
     async with Session() as session:
 
