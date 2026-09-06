@@ -57,7 +57,7 @@ logger = logging.getLogger("POCKET_SIGNAL_BOT")
 bot = Bot(
     token=config.BOT_TOKEN,
     default=DefaultBotProperties(
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
     ),
 )
 
@@ -86,18 +86,11 @@ LAST_KEYS: set[str] = set()
 # ============================================================
 
 app = FastAPI(
-    title="Pocket Option Signal Bot"
+    title="Pocket Option Signal Bot",
 )
 
 
 def market_is_connected() -> bool:
-    """
-    Возвращает реальное состояние PocketMarket.
-
-    MARKET_READY является только внутренним флагом,
-    а реальное состояние определяем по объекту market.
-    """
-
     return bool(
         getattr(
             market,
@@ -113,11 +106,6 @@ def market_is_connected() -> bool:
 
 
 def sync_market_ready() -> bool:
-    """
-    Синхронизирует глобальный MARKET_READY
-    с реальным состоянием PocketMarket.
-    """
-
     global MARKET_READY
 
     actual = market_is_connected()
@@ -136,22 +124,13 @@ def sync_market_ready() -> bool:
 def mark_market_disconnected(
     reason: str = "",
 ) -> None:
-    """
-    Помечает рынок как отключённый.
-    """
-
     global MARKET_READY
 
     if MARKET_READY:
-        if reason:
-            logger.warning(
-                "[MARKET] Connection lost: %s",
-                reason,
-            )
-        else:
-            logger.warning(
-                "[MARKET] Connection lost."
-            )
+        logger.warning(
+            "[MARKET] Connection lost%s",
+            f": {reason}" if reason else ".",
+        )
 
     MARKET_READY = False
 
@@ -188,10 +167,6 @@ async def safe_callback_answer(
     text: Optional[str] = None,
     show_alert: bool = False,
 ) -> bool:
-    """
-    Безопасное подтверждение Telegram callback.
-    """
-
     try:
         await callback.answer(
             text=text,
@@ -225,8 +200,12 @@ async def safe_callback_answer(
 # USER LOCK
 # ============================================================
 
-def get_user_lock(user_id: int) -> asyncio.Lock:
-    lock = USER_ANALYSIS_LOCKS.get(user_id)
+def get_user_lock(
+    user_id: int,
+) -> asyncio.Lock:
+    lock = USER_ANALYSIS_LOCKS.get(
+        user_id
+    )
 
     if lock is None:
         lock = asyncio.Lock()
@@ -240,7 +219,11 @@ def get_user_lock(user_id: int) -> asyncio.Lock:
 # ============================================================
 
 def get_config_pairs() -> list[tuple[str, str]]:
-    pairs = getattr(config, "pairs", None)
+    pairs = getattr(
+        config,
+        "pairs",
+        None,
+    )
 
     if not pairs:
         raise RuntimeError(
@@ -251,17 +234,26 @@ def get_config_pairs() -> list[tuple[str, str]]:
 
 
 def get_config_timeframes() -> list[int]:
-    values = getattr(config, "timeframes", None)
+    values = getattr(
+        config,
+        "timeframes",
+        None,
+    )
 
     if not values:
         raise RuntimeError(
             "В config.py отсутствует список timeframes."
         )
 
-    return [int(x) for x in values]
+    return [
+        int(x)
+        for x in values
+    ]
 
 
-def pair_name(symbol: str) -> str:
+def pair_name(
+    symbol: str,
+) -> str:
     for name, internal in get_config_pairs():
         if internal == symbol:
             return name
@@ -273,8 +265,12 @@ def pair_name(symbol: str) -> str:
 # SIGNAL TEXT
 # ============================================================
 
-def direction_text(direction: str) -> str:
-    value = str(direction).upper()
+def direction_text(
+    direction: str,
+) -> str:
+    value = str(
+        direction
+    ).upper()
 
     if value in {
         "UP",
@@ -324,7 +320,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
                     callback_data="auto_toggle",
                 ),
             ],
-        ]
+        ],
     )
 
 
@@ -363,7 +359,7 @@ def owner_keyboard() -> InlineKeyboardMarkup:
                     callback_data="back_main",
                 ),
             ],
-        ]
+        ],
     )
 
 
@@ -373,8 +369,8 @@ def signal_pair_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="🌐 ЛЮБАЯ ПАРА",
                 callback_data="sigp:ANY",
-            )
-        ]
+            ),
+        ],
     ]
 
     row: list[InlineKeyboardButton] = []
@@ -399,12 +395,12 @@ def signal_pair_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="⬅️ Назад",
                 callback_data="back_main",
-            )
-        ]
+            ),
+        ],
     )
 
     return InlineKeyboardMarkup(
-        inline_keyboard=rows
+        inline_keyboard=rows,
     )
 
 
@@ -432,8 +428,8 @@ def signal_time_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="🌐 ЛЮБОЕ ВРЕМЯ",
                 callback_data="sigt:ANY",
-            )
-        ]
+            ),
+        ],
     )
 
     rows.append(
@@ -441,12 +437,12 @@ def signal_time_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="⬅️ Назад к паре",
                 callback_data="signal",
-            )
-        ]
+            ),
+        ],
     )
 
     return InlineKeyboardMarkup(
-        inline_keyboard=rows
+        inline_keyboard=rows,
     )
 
 
@@ -459,10 +455,6 @@ async def safe_edit(
     text: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
 ):
-    """
-    Безопасное редактирование сообщения.
-    """
-
     try:
         if callback.message:
             await callback.message.edit_text(
@@ -494,13 +486,11 @@ async def progress_message(
     callback: CallbackQuery,
     text: str,
 ):
-    """
-    Живое обновление сообщения анализа.
-    """
-
     try:
         if callback.message:
-            await callback.message.edit_text(text)
+            await callback.message.edit_text(
+                text
+            )
 
     except Exception as exc:
         error_text = str(exc).lower()
@@ -518,12 +508,10 @@ async def progress_message_object(
     message: Message,
     text: str,
 ):
-    """
-    Аналог progress_message для обычного Message.
-    """
-
     try:
-        await message.edit_text(text)
+        await message.edit_text(
+            text
+        )
 
     except Exception as exc:
         error_text = str(exc).lower()
@@ -541,7 +529,9 @@ async def progress_message_object(
 # SIGNAL FORMAT
 # ============================================================
 
-def format_signal(signal) -> str:
+def format_signal(
+    signal,
+) -> str:
     reasons = getattr(
         signal,
         "reasons",
@@ -595,20 +585,7 @@ async def ensure_market_ready(
         Callable[[str], Awaitable[None]]
     ] = None,
 ) -> bool:
-    """
-    Проверяет реальное соединение и при необходимости
-    подключает Pocket Option.
-
-    Важный момент:
-    MARKET_READY никогда не считается достаточным сам по себе.
-    Проверяется market.connected + market.client.
-    """
-
     global MARKET_READY
-
-    # --------------------------------------------------------
-    # ALREADY CONNECTED
-    # --------------------------------------------------------
 
     if market_is_connected():
         MARKET_READY = True
@@ -624,28 +601,11 @@ async def ensure_market_ready(
 
         return True
 
-    # Старый флаг больше не должен оставаться True.
     MARKET_READY = False
 
-    # --------------------------------------------------------
-    # CONNECTION LOCK
-    # --------------------------------------------------------
-
     async with MARKET_CONNECT_LOCK:
-
-        # Пока ждали lock, другой task мог уже подключить рынок.
         if market_is_connected():
             MARKET_READY = True
-
-            if status_callback:
-                await status_callback(
-                    (
-                        "📡 <b>POCKET OPTION ПОДКЛЮЧЁН</b>\n\n"
-                        "✅ Рыночное соединение установлено.\n\n"
-                        "📊 Получаю актуальные рыночные данные..."
-                    )
-                )
-
             return True
 
         MARKET_READY = False
@@ -664,11 +624,14 @@ async def ensure_market_ready(
                     )
                 )
 
-            await market.connect()
+            connected = await market.connect()
 
-            # ------------------------------------------------
-            # CRITICAL VERIFICATION
-            # ------------------------------------------------
+            if not connected:
+                MARKET_READY = False
+
+                raise RuntimeError(
+                    "PocketMarket.connect() вернул False"
+                )
 
             if not market_is_connected():
                 MARKET_READY = False
@@ -729,12 +692,6 @@ async def recover_market(
     ] = None,
     attempts: int = 3,
 ) -> bool:
-    """
-    Быстрое восстановление рынка для текущего анализа.
-
-    Основной watchdog продолжает работать независимо от этого.
-    """
-
     mark_market_disconnected(
         "market recovery requested"
     )
@@ -787,40 +744,22 @@ async def recover_market(
 # ============================================================
 
 async def connect_market_with_retry():
-    """
-    Постоянный watchdog рынка.
-
-    Старый вариант завершался сразу после первого успешного
-    подключения. Новый вариант работает всё время жизни бота.
-
-    Если соединение:
-        отсутствует -> подключается;
-        потеряно -> переподключается;
-        активно -> продолжает мониторинг.
-    """
-
     global MARKET_READY
-
-    delay = 5
 
     logger.info(
         "[MARKET] Connection watchdog started"
     )
 
+    delay = 5
+
     while True:
         try:
-            # ------------------------------------------------
-            # CONNECTION IS ALIVE
-            # ------------------------------------------------
-
             if market_is_connected():
                 MARKET_READY = True
                 delay = 5
 
                 await asyncio.sleep(10)
 
-                # После сна немедленно проверяем,
-                # не потерялось ли соединение.
                 if not market_is_connected():
                     mark_market_disconnected(
                         "PocketMarket reported disconnected"
@@ -828,15 +767,10 @@ async def connect_market_with_retry():
 
                 continue
 
-            # ------------------------------------------------
-            # CONNECTION LOST / NOT READY
-            # ------------------------------------------------
-
             MARKET_READY = False
 
             logger.warning(
-                "[MARKET] Market unavailable. "
-                "Starting reconnect..."
+                "[MARKET] Market unavailable. Starting reconnect..."
             )
 
             connected = await ensure_market_ready()
@@ -849,7 +783,6 @@ async def connect_market_with_retry():
                     "[MARKET] Connection established/recovered."
                 )
 
-                # Небольшая пауза перед очередной проверкой.
                 await asyncio.sleep(5)
 
                 continue
@@ -864,16 +797,14 @@ async def connect_market_with_retry():
                 "[MARKET] Watchdog error"
             )
 
-        # ----------------------------------------------------
-        # RETRY BACKOFF
-        # ----------------------------------------------------
-
         logger.info(
             "[MARKET] Next reconnect attempt in %s sec",
             delay,
         )
 
-        await asyncio.sleep(delay)
+        await asyncio.sleep(
+            delay
+        )
 
         delay = min(
             delay * 2,
@@ -889,17 +820,6 @@ async def get_market_data(
     pair: str,
     required_candles: int,
 ):
-    """
-    Получение свечей с контролем состояния соединения.
-
-    Если рынок отключён, не создаём ложную ошибку
-    "Пустой ответ рынка".
-    """
-
-    # --------------------------------------------------------
-    # PRE-CHECK
-    # --------------------------------------------------------
-
     if not market_is_connected():
         mark_market_disconnected(
             f"candle request while disconnected: {pair}"
@@ -922,10 +842,6 @@ async def get_market_data(
             ),
         )
 
-        # ----------------------------------------------------
-        # EMPTY RESPONSE
-        # ----------------------------------------------------
-
         if not candles:
             if not market_is_connected():
                 mark_market_disconnected(
@@ -940,20 +856,7 @@ async def get_market_data(
                 "Пустой ответ рынка"
             )
 
-        # ----------------------------------------------------
-        # NOT ENOUGH DATA
-        # ----------------------------------------------------
-
         if len(candles) < 60:
-            if not market_is_connected():
-                mark_market_disconnected(
-                    f"market disconnected with incomplete candles: {pair}"
-                )
-
-                raise RuntimeError(
-                    "Рынок отключился во время получения свечей"
-                )
-
             raise RuntimeError(
                 f"Недостаточно свечей: {len(candles)}"
             )
@@ -964,8 +867,6 @@ async def get_market_data(
         raise
 
     except Exception as exc:
-        # Если ошибка произошла из-за реального отключения,
-        # синхронизируем состояние.
         if not market_is_connected():
             mark_market_disconnected(
                 f"{pair}: {exc}"
@@ -1007,10 +908,6 @@ async def scan_market(
         len(pairs) * len(timeframes)
     )
 
-    # --------------------------------------------------------
-    # START ANALYSIS
-    # --------------------------------------------------------
-
     await progress_message(
         callback,
         (
@@ -1023,32 +920,13 @@ async def scan_market(
         ),
     )
 
-    await asyncio.sleep(0.15)
-
-    # --------------------------------------------------------
-    # PAIRS
-    # --------------------------------------------------------
-
     for pair_index, pair in enumerate(
         pairs,
         start=1,
     ):
-        # ----------------------------------------------------
-        # BEFORE EACH PAIR
-        # ----------------------------------------------------
-
         if not market_is_connected():
             mark_market_disconnected(
                 f"scanner before pair {pair}"
-            )
-
-            await progress_message(
-                callback,
-                (
-                    "🔄 <b>СОЕДИНЕНИЕ С РЫНКОМ ПОТЕРЯНО</b>\n\n"
-                    "📡 Останавливаю текущую проверку.\n\n"
-                    "🔄 Восстанавливаю Pocket Option..."
-                ),
             )
 
             recovered = await recover_market(
@@ -1065,12 +943,7 @@ async def scan_market(
                         "автоматические попытки подключения."
                     ),
                 )
-
                 break
-
-        # ----------------------------------------------------
-        # MARKET DATA
-        # ----------------------------------------------------
 
         await progress_message(
             callback,
@@ -1085,10 +958,10 @@ async def scan_market(
 
         candles = None
 
-        # Максимум две попытки:
-        # первая обычная,
-        # вторая после восстановления соединения.
-        for data_attempt in range(1, 3):
+        for data_attempt in range(
+            1,
+            3,
+        ):
             try:
                 candles = await get_market_data(
                     pair,
@@ -1120,63 +993,25 @@ async def scan_market(
                 if market_is_connected():
                     break
 
-                # --------------------------------------------
-                # MARKET LOST
-                # --------------------------------------------
-
                 mark_market_disconnected(
                     f"data request failed for {pair}"
                 )
 
-                await progress_message(
-                    callback,
-                    (
-                        "🔄 <b>СОЕДИНЕНИЕ С РЫНКОМ ПОТЕРЯНО</b>\n\n"
-                        f"💱 Пара: <b>{pair_name(pair)}</b>\n\n"
-                        "📡 Останавливаю запросы к рынку.\n"
-                        "🔄 Восстанавливаю соединение..."
-                    ),
-                )
-
                 recovered = await recover_market(
-                    status_callback=None,
                     attempts=3,
                 )
 
                 if not recovered:
-                    await progress_message(
-                        callback,
-                        (
-                            "⚠️ <b>РЫНОЧНЫЕ ДАННЫЕ "
-                            "ВРЕМЕННО НЕДОСТУПНЫ</b>\n\n"
-                            "Соединение с Pocket Option потеряно.\n\n"
-                            "🤖 Watchdog продолжит "
-                            "переподключение автоматически."
-                        ),
-                    )
-
                     candles = None
                     break
 
-                # После восстановления повторяем
-                # получение свечей этой же пары.
-                continue
-
         if not candles:
-            # Не продолжаем 20 других пар,
-            # если рынок реально отключён.
             if not market_is_connected():
                 break
 
             continue
 
-        # ----------------------------------------------------
-        # TIMEFRAME ANALYSIS
-        # ----------------------------------------------------
-
         for timeframe in timeframes:
-            # Если соединение потерялось между таймфреймами,
-            # немедленно останавливаем текущий цикл.
             if not market_is_connected():
                 mark_market_disconnected(
                     f"scanner during analysis {pair}/{timeframe}"
@@ -1196,7 +1031,11 @@ async def scan_market(
             completed += 1
 
             progress_percent = (
-                completed / max(total_checks, 1)
+                completed
+                / max(
+                    total_checks,
+                    1,
+                )
             ) * 100
 
             await progress_message(
@@ -1239,10 +1078,6 @@ async def scan_market(
             if signal is None:
                 continue
 
-            # ------------------------------------------------
-            # SIGNAL FOUND
-            # ------------------------------------------------
-
             await progress_message(
                 callback,
                 (
@@ -1278,14 +1113,8 @@ async def scan_market(
             ):
                 best_signal = signal
 
-        # Если рынок потерялся внутри анализа,
-        # прекращаем проверку остальных пар.
         if not market_is_connected():
             break
-
-    # --------------------------------------------------------
-    # ANALYSIS COMPLETE
-    # --------------------------------------------------------
 
     if best_signal is not None:
         await progress_message(
@@ -1317,7 +1146,6 @@ async def scan_market(
                     "анализ повторно."
                 ),
             )
-
         else:
             await progress_message(
                 callback,
@@ -1341,7 +1169,9 @@ async def scan_market(
 # DATABASE SIGNAL
 # ============================================================
 
-async def save_best_signal(signal):
+async def save_best_signal(
+    signal,
+):
     try:
         await save_signal(
             pair=signal.pair,
@@ -1480,8 +1310,6 @@ async def signal_pair_selected(
         callback
     )
 
-    user_id = callback.from_user.id
-
     selected = callback.data.split(
         ":",
         1,
@@ -1498,7 +1326,9 @@ async def signal_pair_selected(
 
     elif selected in valid_pairs:
         database_pair = selected
-        display = pair_name(selected)
+        display = pair_name(
+            selected
+        )
 
     else:
         await safe_edit(
@@ -1510,7 +1340,7 @@ async def signal_pair_selected(
 
     try:
         await update_user(
-            user_id,
+            callback.from_user.id,
             pair=database_pair,
         )
 
@@ -1573,9 +1403,7 @@ async def signal_time_selected(
         if not user:
             await ensure_user(
                 telegram_id=user_id,
-                username=(
-                    callback.from_user.username
-                ),
+                username=callback.from_user.username,
                 first_name=(
                     callback.from_user.first_name
                     or ""
@@ -1646,11 +1474,9 @@ async def signal_time_selected(
                 timeframe
             ]
 
-        # ====================================================
-        # LIVE CONNECTION STATUS
-        # ====================================================
-
-        async def telegram_status(text: str):
+        async def telegram_status(
+            text: str,
+        ):
             await progress_message(
                 callback,
                 text,
@@ -1695,10 +1521,6 @@ async def signal_time_selected(
             )
             return
 
-        # ====================================================
-        # MARKET READY
-        # ====================================================
-
         await telegram_status(
             (
                 "📡 <b>POCKET OPTION ПОДКЛЮЧЁН</b>\n\n"
@@ -1707,11 +1529,9 @@ async def signal_time_selected(
             )
         )
 
-        await asyncio.sleep(0.2)
-
-        # ====================================================
-        # ANALYSIS
-        # ====================================================
+        await asyncio.sleep(
+            0.2
+        )
 
         best_signal, successful_pairs = (
             await scan_market(
@@ -1720,10 +1540,6 @@ async def signal_time_selected(
                 timeframes,
             )
         )
-
-        # ====================================================
-        # NO MARKET DATA
-        # ====================================================
 
         if successful_pairs == 0:
             if not market_is_connected():
@@ -1756,10 +1572,6 @@ async def signal_time_selected(
 
             return
 
-        # ====================================================
-        # NO STRONG SIGNAL
-        # ====================================================
-
         if best_signal is None:
             await safe_edit(
                 callback,
@@ -1781,10 +1593,6 @@ async def signal_time_selected(
             )
             return
 
-        # ====================================================
-        # SAVE + FINAL SIGNAL
-        # ====================================================
-
         await telegram_status(
             (
                 "✅ <b>АНАЛИЗ ЗАВЕРШЁН</b>\n\n"
@@ -1797,7 +1605,9 @@ async def signal_time_selected(
             best_signal
         )
 
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(
+            0.15
+        )
 
         await safe_edit(
             callback,
@@ -1829,9 +1639,7 @@ async def settings_handler(
     if not user:
         await ensure_user(
             telegram_id=callback.from_user.id,
-            username=(
-                callback.from_user.username
-            ),
+            username=callback.from_user.username,
             first_name=(
                 callback.from_user.first_name
                 or ""
@@ -1944,9 +1752,7 @@ async def auto_toggle(
     if not user:
         await ensure_user(
             telegram_id=user_id,
-            username=(
-                callback.from_user.username
-            ),
+            username=callback.from_user.username,
             first_name=(
                 callback.from_user.first_name
                 or ""
@@ -2012,7 +1818,9 @@ async def auto_toggle(
 def is_owner(
     user_id: int,
 ) -> bool:
-    return int(user_id) == int(
+    return int(
+        user_id
+    ) == int(
         config.OWNER_ID
     )
 
@@ -2346,13 +2154,11 @@ async def auto_scanner_loop():
             await asyncio.sleep(
                 max(
                     10,
-                    int(config.SCAN_INTERVAL),
+                    int(
+                        config.SCAN_INTERVAL
+                    ),
                 )
             )
-
-            # ------------------------------------------------
-            # GLOBAL CHECK
-            # ------------------------------------------------
 
             if not AUTO_SIGNALS:
                 continue
@@ -2361,8 +2167,7 @@ async def auto_scanner_loop():
                 sync_market_ready()
 
                 logger.debug(
-                    "[AUTO] Market unavailable. "
-                    "Skipping cycle."
+                    "[AUTO] Market unavailable. Skipping cycle."
                 )
 
                 continue
@@ -2371,10 +2176,6 @@ async def auto_scanner_loop():
 
             for user in users:
                 try:
-                    # ----------------------------------------
-                    # CHECK MARKET BEFORE USER
-                    # ----------------------------------------
-
                     if not market_is_connected():
                         mark_market_disconnected(
                             "auto scanner"
@@ -2421,17 +2222,15 @@ async def auto_scanner_loop():
                             in get_config_pairs()
                         ]
                         if selected_pair == "ANY"
-                        else [selected_pair]
+                        else [
+                            selected_pair
+                        ]
                     )
 
                     best_signal = None
                     market_lost = False
 
                     for pair in pairs:
-                        # ------------------------------------
-                        # MARKET CHECK
-                        # ------------------------------------
-
                         if not market_is_connected():
                             mark_market_disconnected(
                                 f"auto scanner {pair}"
@@ -2439,25 +2238,15 @@ async def auto_scanner_loop():
 
                             market_lost = True
 
-                            logger.warning(
-                                "[AUTO] Market lost while "
-                                "scanning %s. "
-                                "Stopping cycle.",
-                                pair,
-                            )
-
                             break
 
                         try:
-                            candles = (
-                                await get_market_data(
-                                    pair,
-                                    max(
-                                        240,
-                                        timeframe * 60
-                                        + 180,
-                                    ),
-                                )
+                            candles = await get_market_data(
+                                pair,
+                                max(
+                                    240,
+                                    timeframe * 60 + 180,
+                                ),
                             )
 
                             signal = engine.analyze(
@@ -2502,19 +2291,11 @@ async def auto_scanner_loop():
                         ):
                             best_signal = signal
 
-                    # ----------------------------------------
-                    # STOP USER LOOP ON MARKET LOSS
-                    # ----------------------------------------
-
                     if market_lost:
                         break
 
                     if best_signal is None:
                         continue
-
-                    # ----------------------------------------
-                    # DUPLICATE PROTECTION
-                    # ----------------------------------------
 
                     key = (
                         f"{user.telegram_id}:"
@@ -2527,26 +2308,22 @@ async def auto_scanner_loop():
                     if key in LAST_KEYS:
                         continue
 
-                    LAST_KEYS.add(key)
+                    LAST_KEYS.add(
+                        key
+                    )
 
-                    if len(LAST_KEYS) > 5000:
+                    if len(
+                        LAST_KEYS
+                    ) > 5000:
                         LAST_KEYS = set(
                             list(
                                 LAST_KEYS
                             )[-2500:]
                         )
 
-                    # ----------------------------------------
-                    # SAVE
-                    # ----------------------------------------
-
                     await save_best_signal(
                         best_signal
                     )
-
-                    # ----------------------------------------
-                    # SEND
-                    # ----------------------------------------
 
                     await bot.send_message(
                         user.telegram_id,
@@ -2571,7 +2348,9 @@ async def auto_scanner_loop():
                 "Auto scanner loop error"
             )
 
-            await asyncio.sleep(10)
+            await asyncio.sleep(
+                10
+            )
 
 
 # ============================================================
@@ -2585,7 +2364,9 @@ async def result_checker_loop():
 
     while True:
         try:
-            await asyncio.sleep(30)
+            await asyncio.sleep(
+                30
+            )
 
             expired = (
                 await mark_expired_signals()
@@ -2605,7 +2386,9 @@ async def result_checker_loop():
                 "Result checker error"
             )
 
-            await asyncio.sleep(10)
+            await asyncio.sleep(
+                10
+            )
 
 
 # ============================================================
@@ -2620,12 +2403,18 @@ async def start_http_server():
         )
     )
 
+    logger.info(
+        "[HTTP] Starting FastAPI on 0.0.0.0:%s",
+        port,
+    )
+
     server = uvicorn.Server(
         uvicorn.Config(
             app,
             host="0.0.0.0",
             port=port,
             log_level="info",
+            access_log=False,
         )
     )
 
@@ -2639,6 +2428,10 @@ async def start_http_server():
 async def start_telegram():
     await bot.delete_webhook(
         drop_pending_updates=False
+    )
+
+    logger.info(
+        "[TELEGRAM] Starting polling..."
     )
 
     await dp.start_polling(
@@ -2655,22 +2448,42 @@ async def start_bot():
 
     await init_db()
 
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # HTTP запускается сразу.
+    # Pocket Option login не блокирует Render health/port.
+    # --------------------------------------------------------
+
+    http_task = asyncio.create_task(
+        start_http_server()
+    )
+
+    market_task = asyncio.create_task(
+        connect_market_with_retry()
+    )
+
+    auto_task = asyncio.create_task(
+        auto_scanner_loop()
+    )
+
+    result_task = asyncio.create_task(
+        result_checker_loop()
+    )
+
     tasks = [
-        asyncio.create_task(
-            start_http_server()
-        ),
-        asyncio.create_task(
-            connect_market_with_retry()
-        ),
-        asyncio.create_task(
-            auto_scanner_loop()
-        ),
-        asyncio.create_task(
-            result_checker_loop()
-        ),
+        http_task,
+        market_task,
+        auto_task,
+        result_task,
     ]
 
     try:
+        # Даём Uvicorn возможность открыть порт
+        # до тяжёлой авторизации Pocket Option.
+        await asyncio.sleep(
+            0.5
+        )
+
         await start_telegram()
 
     finally:
