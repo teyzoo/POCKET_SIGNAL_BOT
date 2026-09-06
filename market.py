@@ -6,12 +6,13 @@ import logging
 import multiprocessing
 import os
 import queue
+import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-
 
 from config import config
 
@@ -24,22 +25,33 @@ logger = logging.getLogger("pocket_market")
 # ============================================================
 
 CONNECT_TIMEOUT = 30
-
 AUTO_LOGIN_TIMEOUT = 120
-
 BALANCE_TIMEOUT = 15
-
 CANDLE_REQUEST_TIMEOUT = 20
-
 CLIENT_CLOSE_TIMEOUT = 5
-
 WEBSOCKET_INIT_DELAY = 5
 
-PLAYWRIGHT_PREPARE_TIMEOUT = 60
+# Подготовка Playwright теперь обычно быстрая,
+# потому что браузер переносится в /tmp.
+PLAYWRIGHT_PREPARE_TIMEOUT = 120
 
 LOGIN_LIBRARY_TIMEOUT = 90
 
 MARKET_TEST_CONNECT_EXTRA = 30
+
+# Runtime directory.
+#
+# НЕ используем напрямую:
+# /opt/render/project/src/.cache/ms-playwright
+#
+# Потому что на Render там иногда возникает:
+# ETXTBSY = Text file busy
+#
+# Вместо этого Chromium копируется в /tmp.
+RUNTIME_PLAYWRIGHT_PATH = os.environ.get(
+    "POCKET_PLAYWRIGHT_RUNTIME_PATH",
+    "/tmp/pocket-option-ms-playwright",
+)
 
 
 # ============================================================
@@ -67,20 +79,42 @@ def _pocket_login_worker(
     demo: bool,
     headless: bool,
     timeout: int,
+    browser_path: str,
 ) -> None:
     """
-    Выполняется в отдельном процессе.
+    Авторизация Pocket Option в отдельном процессе.
 
-    Это важно потому, что asyncio.wait_for() НЕ может
-    физически остановить зависший Python thread.
+    Важно:
+    asyncio.wait_for() не может физически убить зависший
+    Python thread.
 
-    Отдельный process можно завершить через terminate().
+    Поэтому login() запускается в отдельном process.
     """
 
     try:
-        logger = logging.getLogger("pocket_market.login_worker")
+        # В дочернем процессе обязательно устанавливаем
+        # тот же runtime browser path.
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_path
 
-        logger.info(
+        # На Linux создаём отдельную process group.
+        # Это помогает корректно завершать дочерний
+        # браузер Playwright вместе с worker.
+        if os.name == "posix":
+            try:
+                os.setsid()
+            except Exception:
+                pass
+
+        worker_logger = logging.getLogger(
+            "pocket_market.login_worker"
+        )
+
+        worker_logger.info(
+            "[LOGIN WORKER] PLAYWRIGHT_BROWSERS_PATH=%s",
+            browser_path,
+        )
+
+        worker_logger.info(
             "[LOGIN WORKER] Импортирую BinaryOptionsToolsV2..."
         )
 
@@ -88,7 +122,7 @@ def _pocket_login_worker(
             login,
         )
 
-        logger.info(
+        worker_logger.info(
             "[LOGIN WORKER] Запускаю Pocket Option login..."
         )
 
@@ -156,31 +190,51 @@ class PocketMarket:
         )
 
     # ========================================================
-    # PLAYWRIGHT PATH
+    # PLAYWRIGHT SOURCE PATH
     # ========================================================
 
     @staticmethod
-    def _get_playwright_browser_path() -> str:
+    def _get_playwright_source_path() -> str:
         """
-        Возвращает директорию Playwright browsers.
+        Находит исходную директорию Playwright.
 
         Приоритет:
 
-        1. PLAYWRIGHT_BROWSERS_PATH
-        2. Render project .cache/ms-playwright
-        3. локальный .cache/ms-playwright
+        1. POCKET_PLAYWRIGHT_SOURCE_PATH
+        2. старый PLAYWRIGHT_BROWSERS_PATH,
+           если он не указывает на runtime /tmp
+        3. Render .cache/ms-playwright
+        4. локальный .cache/ms-playwright
         """
+
+        explicit_source = os.environ.get(
+            "POCKET_PLAYWRIGHT_SOURCE_PATH"
+        )
+
+        if explicit_source:
+            return os.path.abspath(
+                os.path.expanduser(
+                    explicit_source
+                )
+            )
 
         configured_path = os.environ.get(
             "PLAYWRIGHT_BROWSERS_PATH"
         )
 
         if configured_path:
-            return os.path.abspath(
+            configured_path = os.path.abspath(
                 os.path.expanduser(
                     configured_path
                 )
             )
+
+            runtime_path = os.path.abspath(
+                RUNTIME_PLAYWRIGHT_PATH
+            )
+
+            if configured_path != runtime_path:
+                return configured_path
 
         render_path = (
             "/opt/render/project/src/"
@@ -188,7 +242,7 @@ class PocketMarket:
         )
 
         if os.path.isdir(
-            "/opt/render/project/src"
+            render_path
         ):
             return render_path
 
@@ -200,6 +254,20 @@ class PocketMarket:
             )
         )
 
+    # ========================================================
+    # PLAYWRIGHT RUNTIME PATH
+    # ========================================================
+
+    @staticmethod
+    def _get_playwright_runtime_path() -> str:
+        return os.path.abspath(
+            os.path.expanduser(
+                RUNTIME_PLAYWRIGHT_PATH
+            )
+        )
+
+    # ========================================================
+    # FIND BROWSER EXECUTABLES
     # ========================================================
 
     @staticmethod
@@ -219,7 +287,6 @@ class PocketMarket:
             for root, dirs, files in os.walk(
                 browser_path
             ):
-
                 _ = dirs
 
                 for filename in files:
@@ -239,7 +306,6 @@ class PocketMarket:
                         if os.path.isfile(
                             full_path
                         ):
-
                             found.append(
                                 full_path
                             )
@@ -253,6 +319,38 @@ class PocketMarket:
 
         return found
 
+    # ========================================================
+    # FIND CHROMIUM
+    # ========================================================
+
+    @staticmethod
+    def _find_chromium_executable(
+        browser_path: str,
+    ) -> str | None:
+
+        executables = (
+            PocketMarket
+            ._find_browser_executables(
+                browser_path
+            )
+        )
+
+        for path in executables:
+
+            filename = os.path.basename(
+                path
+            ).lower()
+
+            if filename in (
+                "chrome",
+                "chromium",
+            ):
+                return path
+
+        return None
+
+    # ========================================================
+    # GET PLAYWRIGHT CHROMIUM PATH
     # ========================================================
 
     @staticmethod
@@ -293,6 +391,8 @@ class PocketMarket:
         return None
 
     # ========================================================
+    # INSTALL CHROMIUM
+    # ========================================================
 
     @staticmethod
     def _install_chromium(
@@ -301,7 +401,12 @@ class PocketMarket:
 
         logger.warning(
             "Playwright Chromium отсутствует. "
-            "Запускаю установку Chromium..."
+            "Запускаю установку Chromium в runtime..."
+        )
+
+        os.makedirs(
+            browser_path,
+            exist_ok=True,
         )
 
         env = os.environ.copy()
@@ -370,6 +475,235 @@ class PocketMarket:
             )
 
     # ========================================================
+    # MAKE EXECUTABLE
+    # ========================================================
+
+    @staticmethod
+    def _make_executable(
+        path: str,
+    ) -> None:
+
+        try:
+
+            current_mode = os.stat(
+                path
+            ).st_mode
+
+            os.chmod(
+                path,
+                current_mode
+                | stat.S_IXUSR
+                | stat.S_IXGRP
+                | stat.S_IXOTH,
+            )
+
+        except Exception as exc:
+
+            logger.warning(
+                "Не удалось выставить executable "
+                "permissions для %s: %s",
+                path,
+                exc,
+            )
+
+    # ========================================================
+    # COPY CHROMIUM TO /tmp
+    # ========================================================
+
+    @staticmethod
+    def _copy_chromium_to_runtime(
+        source_executable: str,
+        runtime_path: str,
+    ) -> str:
+        """
+        Копирует ВСЮ папку chromium-* из Render cache
+        в /tmp.
+
+        Нельзя копировать только chrome:
+        Chromium требует дополнительные ресурсы рядом
+        с executable.
+        """
+
+        if not os.path.isfile(
+            source_executable
+        ):
+            raise RuntimeError(
+                "Исходный Chromium executable "
+                "не найден: "
+                f"{source_executable}"
+            )
+
+        source_dir = os.path.dirname(
+            source_executable
+        )
+
+        # Обычно:
+        #
+        # .../ms-playwright/
+        #   chromium-1234/
+        #       chrome-linux64/
+        #           chrome
+        #
+        # Нам нужно скопировать chromium-1234 целиком.
+
+        browser_root = source_dir
+
+        for _ in range(4):
+
+            parent = os.path.dirname(
+                browser_root
+            )
+
+            if not parent:
+                break
+
+            base = os.path.basename(
+                browser_root
+            ).lower()
+
+            if base.startswith(
+                "chromium-"
+            ):
+                break
+
+            browser_root = parent
+
+        base_name = os.path.basename(
+            browser_root
+        )
+
+        if not base_name.lower().startswith(
+            "chromium-"
+        ):
+
+            # Fallback: копируем chrome-linux64
+            # в runtime.
+            browser_root = source_dir
+            base_name = os.path.basename(
+                browser_root
+            )
+
+        destination_root = os.path.join(
+            runtime_path,
+            base_name,
+        )
+
+        logger.info(
+            "[PLAYWRIGHT] Копирую Chromium:"
+        )
+
+        logger.info(
+            "[PLAYWRIGHT] SOURCE: %s",
+            browser_root,
+        )
+
+        logger.info(
+            "[PLAYWRIGHT] DESTINATION: %s",
+            destination_root,
+        )
+
+        os.makedirs(
+            runtime_path,
+            exist_ok=True,
+        )
+
+        # Если уже есть предыдущая копия,
+        # удаляем её и создаём чистую.
+        if os.path.exists(
+            destination_root
+        ):
+
+            try:
+
+                shutil.rmtree(
+                    destination_root
+                )
+
+            except Exception as exc:
+
+                raise RuntimeError(
+                    "Не удалось очистить старую "
+                    "runtime-копию Chromium: "
+                    f"{exc}"
+                ) from exc
+
+        try:
+
+            shutil.copytree(
+                browser_root,
+                destination_root,
+            )
+
+        except Exception as exc:
+
+            raise RuntimeError(
+                "Не удалось скопировать Chromium "
+                f"в /tmp: {exc}"
+            ) from exc
+
+        # Исправляем права на все executable-файлы.
+        for root, dirs, files in os.walk(
+            destination_root
+        ):
+
+            _ = dirs
+
+            for filename in files:
+
+                path = os.path.join(
+                    root,
+                    filename,
+                )
+
+                if filename in (
+                    "chrome",
+                    "chrome-headless-shell",
+                    "chromium",
+                ):
+
+                    PocketMarket._make_executable(
+                        path
+                    )
+
+        runtime_executable = os.path.join(
+            destination_root,
+            os.path.relpath(
+                source_executable,
+                browser_root,
+            ),
+        )
+
+        if not os.path.isfile(
+            runtime_executable
+        ):
+
+            # Fallback search.
+            runtime_executable = (
+                PocketMarket
+                ._find_chromium_executable(
+                    runtime_path
+                )
+            ) or ""
+
+        if not runtime_executable:
+
+            raise RuntimeError(
+                "Chromium скопирован в /tmp, "
+                "но executable не найден."
+            )
+
+        PocketMarket._make_executable(
+            runtime_executable
+        )
+
+        logger.info(
+            "[PLAYWRIGHT] Runtime Chromium: %s",
+            runtime_executable,
+        )
+
+        return runtime_executable
+
+    # ========================================================
     # SAFE CHROMIUM TEST
     # ========================================================
 
@@ -380,14 +714,11 @@ class PocketMarket:
         """
         Проверяет реальный запуск Chromium.
 
-        Для Render:
+        Для Render используются:
         - no-sandbox
         - disable-dev-shm-usage
         - disable-gpu
         - no-zygote
-
-        При ETXTBSY пробуем запустить Chromium
-        через системный /tmp-клон executable.
         """
 
         from playwright.sync_api import (
@@ -422,97 +753,34 @@ class PocketMarket:
                     "[PLAYWRIGHT] Проверяю запуск Chromium..."
                 )
 
-                try:
-
-                    browser = (
-                        pw.chromium.launch(
-                            **launch_kwargs
-                        )
+                browser = (
+                    pw.chromium.launch(
+                        **launch_kwargs
                     )
-
-                except Exception as first_exc:
-
-                    error_text = str(
-                        first_exc
-                    )
-
-                    logger.error(
-                        "[PLAYWRIGHT] Первый запуск Chromium "
-                        "не удался: %s",
-                        error_text,
-                    )
-
-                    if "ETXTBSY" not in error_text.upper():
-
-                        raise
-
-                    # =================================================
-                    # ETXTBSY FIX
-                    # =================================================
-                    #
-                    # Render иногда возвращает ETXTBSY, когда
-                    # executable находится в cache/overlay filesystem.
-                    #
-                    # Делаем копию бинарника в /tmp и запускаем уже
-                    # копию.
-                    # =================================================
-
-                    if not executable_path:
-
-                        raise
-
-                    import shutil
-                    import tempfile
-
-                    tmp_dir = tempfile.mkdtemp(
-                        prefix="po_chromium_",
-                        dir="/tmp",
-                    )
-
-                    tmp_executable = os.path.join(
-                        tmp_dir,
-                        "chrome",
-                    )
-
-                    logger.warning(
-                        "[PLAYWRIGHT] Обнаружен ETXTBSY. "
-                        "Копирую Chromium в %s",
-                        tmp_executable,
-                    )
-
-                    shutil.copy2(
-                        executable_path,
-                        tmp_executable,
-                    )
-
-                    os.chmod(
-                        tmp_executable,
-                        0o755,
-                    )
-
-                    retry_kwargs = dict(
-                        launch_kwargs
-                    )
-
-                    retry_kwargs[
-                        "executable_path"
-                    ] = tmp_executable
-
-                    browser = (
-                        pw.chromium.launch(
-                            **retry_kwargs
-                        )
-                    )
-
-                    logger.info(
-                        "[PLAYWRIGHT] Chromium успешно "
-                        "запущен из /tmp-копии."
-                    )
+                )
 
                 logger.info(
                     "[PLAYWRIGHT] Chromium "
                     "успешно запущен."
                 )
+
+                # Небольшой реальный smoke test.
+                page = browser.new_page()
+
+                try:
+
+                    page.goto(
+                        "about:blank",
+                        wait_until="domcontentloaded",
+                        timeout=15000,
+                    )
+
+                finally:
+
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
 
         except Exception as exc:
 
@@ -547,203 +815,285 @@ class PocketMarket:
     # ========================================================
 
     @staticmethod
-    def _prepare_playwright_environment() -> None:
+    def _prepare_playwright_environment() -> str:
+        """
+        Главная подготовка Playwright.
 
-        browser_path = (
+        Ключевая схема:
+
+        Render cache
+             ↓
+        Chromium executable
+             ↓
+        копия ВСЕЙ папки chromium-* 
+             ↓
+        /tmp/pocket-option-ms-playwright
+             ↓
+        PLAYWRIGHT_BROWSERS_PATH=/tmp/...
+             ↓
+        login()
+        """
+
+        runtime_path = (
             PocketMarket
-            ._get_playwright_browser_path()
+            ._get_playwright_runtime_path()
+        )
+
+        source_path = (
+            PocketMarket
+            ._get_playwright_source_path()
+        )
+
+        logger.info(
+            "[PLAYWRIGHT] Source path: %s",
+            source_path,
+        )
+
+        logger.info(
+            "[PLAYWRIGHT] Runtime path: %s",
+            runtime_path,
+        )
+
+        os.makedirs(
+            runtime_path,
+            exist_ok=True,
+        )
+
+        # ====================================================
+        # УЖЕ РАБОЧИЙ RUNTIME
+        # ====================================================
+
+        runtime_executable = (
+            PocketMarket
+            ._find_chromium_executable(
+                runtime_path
+            )
+        )
+
+        if runtime_executable:
+
+            logger.info(
+                "[PLAYWRIGHT] Найден Chromium "
+                "в runtime: %s",
+                runtime_executable,
+            )
+
+            PocketMarket._make_executable(
+                runtime_executable
+            )
+
+            os.environ[
+                "PLAYWRIGHT_BROWSERS_PATH"
+            ] = runtime_path
+
+            try:
+
+                PocketMarket._launch_test_browser(
+                    executable_path=runtime_executable
+                )
+
+                logger.info(
+                    "[PLAYWRIGHT] Runtime Chromium "
+                    "успешно прошёл smoke test."
+                )
+
+                return runtime_path
+
+            except Exception as exc:
+
+                logger.warning(
+                    "[PLAYWRIGHT] Runtime Chromium "
+                    "не запустился: %s",
+                    exc,
+                )
+
+                # Удаляем битую runtime-копию.
+                try:
+
+                    for name in os.listdir(
+                        runtime_path
+                    ):
+
+                        path = os.path.join(
+                            runtime_path,
+                            name,
+                        )
+
+                        if os.path.isdir(
+                            path
+                        ):
+
+                            shutil.rmtree(
+                                path,
+                                ignore_errors=True,
+                            )
+
+                        elif os.path.isfile(
+                            path
+                        ):
+
+                            try:
+                                os.remove(path)
+                            except Exception:
+                                pass
+
+                except Exception:
+
+                    logger.exception(
+                        "Ошибка очистки runtime "
+                        "Playwright directory."
+                    )
+
+        # ====================================================
+        # ИЩЕМ CHROMIUM В SOURCE
+        # ====================================================
+
+        source_executable = (
+            PocketMarket
+            ._find_chromium_executable(
+                source_path
+            )
+        )
+
+        if source_executable:
+
+            logger.info(
+                "[PLAYWRIGHT] Chromium найден "
+                "в Render cache: %s",
+                source_executable,
+            )
+
+            # =================================================
+            # КРИТИЧЕСКИЙ FIX ETXTBSY
+            # =================================================
+
+            runtime_executable = (
+                PocketMarket
+                ._copy_chromium_to_runtime(
+                    source_executable=source_executable,
+                    runtime_path=runtime_path,
+                )
+            )
+
+            os.environ[
+                "PLAYWRIGHT_BROWSERS_PATH"
+            ] = runtime_path
+
+            logger.info(
+                "[PLAYWRIGHT] "
+                "PLAYWRIGHT_BROWSERS_PATH=%s",
+                runtime_path,
+            )
+
+            try:
+
+                PocketMarket._launch_test_browser(
+                    executable_path=runtime_executable
+                )
+
+            except Exception as exc:
+
+                logger.warning(
+                    "[PLAYWRIGHT] "
+                    "Скопированный Chromium "
+                    "не запустился: %s",
+                    exc,
+                )
+
+                # Попробуем Playwright's own executable
+                # path из runtime.
+                runtime_executable_2 = (
+                    PocketMarket
+                    ._get_chromium_executable()
+                )
+
+                if (
+                    runtime_executable_2
+                    and os.path.isfile(
+                        runtime_executable_2
+                    )
+                ):
+
+                    PocketMarket._make_executable(
+                        runtime_executable_2
+                    )
+
+                    PocketMarket._launch_test_browser(
+                        executable_path=runtime_executable_2
+                    )
+
+                    return runtime_path
+
+                raise
+
+            logger.info(
+                "[PLAYWRIGHT] Chromium успешно "
+                "запущен из /tmp."
+            )
+
+            return runtime_path
+
+        # ====================================================
+        # CHROMIUM НЕ НАЙДЕН — INSTALL В /tmp
+        # ====================================================
+
+        logger.warning(
+            "[PLAYWRIGHT] Chromium не найден "
+            "ни в runtime, ни в source cache."
+        )
+
+        PocketMarket._install_chromium(
+            runtime_path
         )
 
         os.environ[
             "PLAYWRIGHT_BROWSERS_PATH"
-        ] = browser_path
+        ] = runtime_path
 
-        logger.info(
-            "PLAYWRIGHT_BROWSERS_PATH=%s",
-            browser_path,
-        )
-
-        os.makedirs(
-            browser_path,
-            exist_ok=True,
-        )
-
-        try:
-
-            from playwright.sync_api import (
-                sync_playwright,
-            )
-
-        except Exception as exc:
-
-            raise RuntimeError(
-                "Playwright не импортируется: "
-                f"{exc}"
-            ) from exc
-
-        chromium_path: str | None = None
-        firefox_path: str | None = None
-
-        try:
-
-            with sync_playwright() as pw:
-
-                chromium_path = (
-                    pw.chromium.executable_path
-                )
-
-                firefox_path = (
-                    pw.firefox.executable_path
-                )
-
-        except Exception as exc:
-
-            logger.warning(
-                "Не удалось получить browser "
-                f"paths из Playwright: {exc}"
-            )
-
-        logger.info(
-            "Playwright Chromium executable: %s",
-            chromium_path,
-        )
-
-        logger.info(
-            "Playwright Firefox executable: %s",
-            firefox_path,
-        )
-
-        chromium_exists = bool(
-            chromium_path
-            and os.path.isfile(
-                chromium_path
+        runtime_executable = (
+            PocketMarket
+            ._find_chromium_executable(
+                runtime_path
             )
         )
 
-        firefox_exists = bool(
-            firefox_path
-            and os.path.isfile(
-                firefox_path
-            )
-        )
+        if not runtime_executable:
 
-        logger.info(
-            "Chromium installed: %s",
-            chromium_exists,
-        )
-
-        logger.info(
-            "Firefox installed: %s",
-            firefox_exists,
-        )
-
-        # ====================================================
-        # INSTALL
-        # ====================================================
-
-        if not chromium_exists:
-
-            found_browsers = (
-                PocketMarket
-                ._find_browser_executables(
-                    browser_path
-                )
-            )
-
-            logger.warning(
-                "До установки найдены "
-                "browser executables: %s",
-                found_browsers,
-            )
-
-            PocketMarket._install_chromium(
-                browser_path
-            )
-
-            chromium_path = (
+            runtime_executable = (
                 PocketMarket
                 ._get_chromium_executable()
             )
 
-            logger.info(
-                "Chromium executable after "
-                "installation: %s",
-                chromium_path,
-            )
-
-            chromium_exists = bool(
-                chromium_path
-                and os.path.isfile(
-                    chromium_path
-                )
-            )
-
-        # ====================================================
-        # MANUAL SEARCH
-        # ====================================================
-
-        if not chromium_exists:
-
-            found_browsers = (
-                PocketMarket
-                ._find_browser_executables(
-                    browser_path
-                )
-            )
-
-            logger.error(
-                "Найденные browser executables: %s",
-                found_browsers,
-            )
-
-            candidate = None
-
-            for path in found_browsers:
-
-                filename = os.path.basename(
-                    path
-                ).lower()
-
-                if filename in (
-                    "chrome",
-                    "chrome-headless-shell",
-                    "chromium",
-                ):
-
-                    candidate = path
-                    break
-
-            if candidate:
-
-                logger.info(
-                    "Найден Chromium вручную: %s",
-                    candidate,
-                )
-
-                chromium_path = candidate
-                chromium_exists = True
-
-        # ====================================================
-        # FINAL CHECK
-        # ====================================================
-
-        if not chromium_exists:
+        if not runtime_executable:
 
             raise RuntimeError(
                 "Playwright Chromium отсутствует "
-                "даже после попытки установки. "
-                f"Browser directory: "
-                f"{browser_path}"
+                "после установки."
             )
 
+        if not os.path.isfile(
+            runtime_executable
+        ):
+
+            raise RuntimeError(
+                "Chromium executable не найден: "
+                f"{runtime_executable}"
+            )
+
+        PocketMarket._make_executable(
+            runtime_executable
+        )
+
         logger.info(
-            "Chromium найден: %s",
-            chromium_path,
+            "[PLAYWRIGHT] Installed Chromium: %s",
+            runtime_executable,
         )
 
         PocketMarket._launch_test_browser(
-            executable_path=chromium_path
+            executable_path=runtime_executable
         )
+
+        return runtime_path
 
     # ========================================================
     # RUN LOGIN PROCESS
@@ -754,6 +1104,7 @@ class PocketMarket:
         email: str,
         password: str,
         demo: bool,
+        browser_path: str,
     ) -> str:
 
         logger.info(
@@ -786,6 +1137,7 @@ class PocketMarket:
                 demo,
                 True,
                 LOGIN_LIBRARY_TIMEOUT,
+                browser_path,
             ),
             daemon=True,
         )
@@ -876,12 +1228,12 @@ class PocketMarket:
                     0.25
                 )
 
-            # =================================================
+            # ---------------------------------------------
             # HARD TIMEOUT
-            # =================================================
+            # ---------------------------------------------
 
             logger.error(
-                "[AUTO LOGIN] ❌ Login process "
+                "[AUTO LOGIN] Login process "
                 "превысил hard timeout %s секунд.",
                 AUTO_LOGIN_TIMEOUT,
             )
@@ -897,6 +1249,31 @@ class PocketMarket:
                     "login process PID=%s...",
                     process.pid,
                 )
+
+                # На Linux пытаемся завершить всю process group,
+                # включая Chromium, запущенный Playwright.
+                if (
+                    os.name == "posix"
+                    and process.pid
+                ):
+
+                    try:
+
+                        import signal
+
+                        os.killpg(
+                            process.pid,
+                            signal.SIGTERM,
+                        )
+
+                    except Exception as exc:
+
+                        logger.warning(
+                            "[AUTO LOGIN] "
+                            "Не удалось завершить "
+                            "process group: %s",
+                            exc,
+                        )
 
                 try:
 
@@ -928,6 +1305,26 @@ class PocketMarket:
                         "не завершился после terminate()."
                     )
 
+                    try:
+
+                        process.kill()
+
+                    except Exception:
+
+                        logger.exception(
+                            "Ошибка kill login process."
+                        )
+
+                    try:
+
+                        process.join(
+                            timeout=2
+                        )
+
+                    except Exception:
+
+                        pass
+
             else:
 
                 try:
@@ -939,6 +1336,14 @@ class PocketMarket:
                 except Exception:
 
                     pass
+
+            try:
+
+                result_queue.cancel_join_thread()
+
+            except Exception:
+
+                pass
 
             try:
 
@@ -977,8 +1382,7 @@ class PocketMarket:
             )
 
         logger.info(
-            "[AUTO LOGIN] Email: %s",
-            config.po_email,
+            "[AUTO LOGIN] Email задан."
         )
 
         logger.info(
@@ -995,9 +1399,11 @@ class PocketMarket:
             "Проверяю Playwright/Chromium..."
         )
 
+        browser_path: str
+
         try:
 
-            await asyncio.wait_for(
+            browser_path = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._prepare_playwright_environment
                 ),
@@ -1042,6 +1448,11 @@ class PocketMarket:
                 f"{exc}"
             ) from exc
 
+        logger.info(
+            "[AUTO LOGIN] Runtime browser path: %s",
+            browser_path,
+        )
+
         # ====================================================
         # LOGIN
         # ====================================================
@@ -1077,6 +1488,7 @@ class PocketMarket:
                     email=config.po_email,
                     password=config.po_password,
                     demo=config.po_demo,
+                    browser_path=browser_path,
                 ),
                 timeout=AUTO_LOGIN_TIMEOUT + 5,
             )
@@ -1144,13 +1556,14 @@ class PocketMarket:
             ):
 
                 logger.error(
-                    "[AUTO LOGIN] ❌ Chromium ETXTBSY."
+                    "[AUTO LOGIN] ❌ Chromium ETXTBSY "
+                    "даже после переноса в /tmp."
                 )
 
                 raise RuntimeError(
-                    "Render не смог запустить Chromium "
-                    "из Playwright cache (ETXTBSY). "
-                    "Попробуйте redeploy с очисткой cache."
+                    "Chromium получил ETXTBSY даже "
+                    "в runtime /tmp. "
+                    f"Детали: {error_text}"
                 ) from exc
 
             # =================================================
