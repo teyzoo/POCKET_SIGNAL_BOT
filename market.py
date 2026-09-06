@@ -20,12 +20,32 @@ logger = logging.getLogger("pocket_market")
 # TIMEOUTS
 # ============================================================
 
+# Максимальное время создания PocketOptionAsync.
 CONNECT_TIMEOUT = 30
+
+# Максимальное время автоматического получения SSID.
 AUTO_LOGIN_TIMEOUT = 120
+
+# Максимальное время одной операции balance().
 BALANCE_TIMEOUT = 15
+
+# Максимальное время одного запроса свечей.
 CANDLE_REQUEST_TIMEOUT = 20
+
+# Максимальное время закрытия клиента.
 CLIENT_CLOSE_TIMEOUT = 5
+
+# Время ожидания после создания клиента.
 WEBSOCKET_INIT_DELAY = 5
+
+# Подготовка Playwright.
+PLAYWRIGHT_PREPARE_TIMEOUT = 60
+
+# Внутренний timeout библиотеки login().
+LOGIN_LIBRARY_TIMEOUT = 90
+
+# Общий запас для проверки рынка.
+MARKET_TEST_CONNECT_EXTRA = 30
 
 
 # ============================================================
@@ -70,7 +90,7 @@ class PocketMarket:
         )
 
     # ========================================================
-    # PLAYWRIGHT
+    # PLAYWRIGHT PATH
     # ========================================================
 
     @staticmethod
@@ -79,9 +99,10 @@ class PocketMarket:
         Возвращает директорию Playwright browsers.
 
         Приоритет:
-        1. PLAYWRIGHT_BROWSERS_PATH из окружения Render.
-        2. /opt/render/project/src/.cache/ms-playwright
-        3. .cache/ms-playwright относительно текущего проекта.
+
+        1. PLAYWRIGHT_BROWSERS_PATH
+        2. Render project .cache/ms-playwright
+        3. локальный .cache/ms-playwright
         """
 
         configured_path = os.environ.get(
@@ -113,7 +134,7 @@ class PocketMarket:
             )
         )
 
-    # --------------------------------------------------------
+    # ========================================================
 
     @staticmethod
     def _find_browser_executables(
@@ -122,7 +143,9 @@ class PocketMarket:
 
         found: list[str] = []
 
-        if not os.path.isdir(browser_path):
+        if not os.path.isdir(
+            browser_path
+        ):
             return found
 
         try:
@@ -130,6 +153,10 @@ class PocketMarket:
             for root, dirs, files in os.walk(
                 browser_path
             ):
+
+                # Не используем dirs напрямую,
+                # но оставляем os.walk совместимым.
+                _ = dirs
 
                 for filename in files:
 
@@ -162,7 +189,7 @@ class PocketMarket:
 
         return found
 
-    # --------------------------------------------------------
+    # ========================================================
 
     @staticmethod
     def _get_chromium_executable() -> str | None:
@@ -201,7 +228,7 @@ class PocketMarket:
 
         return None
 
-    # --------------------------------------------------------
+    # ========================================================
 
     @staticmethod
     def _install_chromium(
@@ -283,15 +310,15 @@ class PocketMarket:
                 f"{process.returncode}"
             )
 
-    # --------------------------------------------------------
+    # ========================================================
 
     @staticmethod
     def _launch_test_browser(
         executable_path: str | None = None,
     ) -> None:
         """
-        Реально запускает Chromium и проверяет,
-        что браузер способен работать в Render.
+        Проверяет реальный запуск Chromium
+        в окружении Render.
         """
 
         from playwright.sync_api import (
@@ -312,6 +339,7 @@ class PocketMarket:
                         "--disable-gpu",
                         "--disable-setuid-sandbox",
                         "--no-zygote",
+                        "--disable-blink-features=AutomationControlled",
                     ],
                 }
 
@@ -321,6 +349,10 @@ class PocketMarket:
                         "executable_path"
                     ] = executable_path
 
+                logger.info(
+                    "[PLAYWRIGHT] Проверяю запуск Chromium..."
+                )
+
                 browser = (
                     pw.chromium.launch(
                         **launch_kwargs
@@ -328,7 +360,7 @@ class PocketMarket:
                 )
 
                 logger.info(
-                    "Playwright Chromium "
+                    "[PLAYWRIGHT] Chromium "
                     "успешно запущен."
                 )
 
@@ -359,14 +391,14 @@ class PocketMarket:
                         "диагностического Chromium."
                     )
 
-    # --------------------------------------------------------
+    # ========================================================
+    # PREPARE PLAYWRIGHT
+    # ========================================================
 
     @staticmethod
     def _prepare_playwright_environment() -> None:
         """
         Подготавливает Playwright для Render.
-
-        Не используется жёсткий chromium-XXXX путь.
         """
 
         browser_path = (
@@ -572,15 +604,31 @@ class PocketMarket:
 
     async def auto_login(self) -> str:
         """
-        Автоматический вход Pocket Option через
+        Автоматическая авторизация Pocket Option.
+
+        Использует официальный login helper
         BinaryOptionsToolsV2.
+
+        Важно:
+        login() синхронный, поэтому он выполняется
+        в отдельном thread и не блокирует asyncio.
         """
+
+        logger.info(
+            "[AUTO LOGIN] STEP 1/5: "
+            "Проверяю PO_EMAIL..."
+        )
 
         if not config.po_email:
 
             raise RuntimeError(
                 "PO_EMAIL не задан."
             )
+
+        logger.info(
+            "[AUTO LOGIN] STEP 2/5: "
+            "Проверяю PO_PASSWORD..."
+        )
 
         if not config.po_password:
 
@@ -589,13 +637,23 @@ class PocketMarket:
             )
 
         logger.info(
-            "Запускаю автоматическую авторизацию "
-            "Pocket Option через Playwright..."
+            "[AUTO LOGIN] Email: %s",
+            config.po_email,
+        )
+
+        logger.info(
+            "[AUTO LOGIN] Demo: %s",
+            config.po_demo,
         )
 
         # ----------------------------------------------------
-        # PLAYWRIGHT
+        # PLAYWRIGHT PREPARATION
         # ----------------------------------------------------
+
+        logger.info(
+            "[AUTO LOGIN] STEP 3/5: "
+            "Проверяю Playwright/Chromium..."
+        )
 
         try:
 
@@ -603,7 +661,7 @@ class PocketMarket:
                 asyncio.to_thread(
                     self._prepare_playwright_environment
                 ),
-                timeout=300,
+                timeout=PLAYWRIGHT_PREPARE_TIMEOUT,
             )
 
         except asyncio.CancelledError:
@@ -614,7 +672,13 @@ class PocketMarket:
 
             self.last_error = (
                 "Подготовка Playwright "
-                "превысила timeout 300 секунд."
+                f"превысила timeout "
+                f"{PLAYWRIGHT_PREPARE_TIMEOUT} секунд."
+            )
+
+            logger.error(
+                "[AUTO LOGIN] ❌ %s",
+                self.last_error,
             )
 
             raise RuntimeError(
@@ -623,7 +687,14 @@ class PocketMarket:
 
         except Exception as exc:
 
-            self.last_error = str(exc)
+            self.last_error = str(
+                exc
+            )
+
+            logger.exception(
+                "[AUTO LOGIN] ❌ "
+                "Playwright preparation failed."
+            )
 
             raise RuntimeError(
                 "Playwright не готов для "
@@ -635,6 +706,11 @@ class PocketMarket:
         # LOGIN IMPORT
         # ----------------------------------------------------
 
+        logger.info(
+            "[AUTO LOGIN] STEP 4/5: "
+            "Загружаю BinaryOptionsToolsV2 login..."
+        )
+
         try:
 
             from BinaryOptionsToolsV2.pocketoption.tools.login import (
@@ -643,7 +719,14 @@ class PocketMarket:
 
         except Exception as exc:
 
-            self.last_error = str(exc)
+            self.last_error = str(
+                exc
+            )
+
+            logger.exception(
+                "[AUTO LOGIN] ❌ "
+                "Не удалось импортировать login."
+            )
 
             raise RuntimeError(
                 "Не удалось импортировать "
@@ -655,14 +738,38 @@ class PocketMarket:
         # LOGIN
         # ----------------------------------------------------
 
+        logger.info(
+            "[AUTO LOGIN] STEP 5/5: "
+            "Запускаю вход в Pocket Option..."
+        )
+
+        logger.info(
+            "[AUTO LOGIN] "
+            "Backend: playwright"
+        )
+
+        logger.info(
+            "[AUTO LOGIN] "
+            "Library timeout: %s сек.",
+            LOGIN_LIBRARY_TIMEOUT,
+        )
+
+        logger.info(
+            "[AUTO LOGIN] "
+            "Overall timeout: %s сек.",
+            AUTO_LOGIN_TIMEOUT,
+        )
+
         try:
 
-            logger.info(
-                "Calling BinaryOptionsToolsV2 "
-                "login backend=playwright..."
-            )
+            # login() является синхронной функцией.
+            #
+            # Поэтому запускаем её в отдельном thread.
+            #
+            # Это предотвращает блокировку Telegram
+            # event loop.
 
-            ssid = await asyncio.wait_for(
+            login_task = asyncio.create_task(
                 asyncio.to_thread(
                     login,
                     config.po_email,
@@ -670,10 +777,35 @@ class PocketMarket:
                     demo=config.po_demo,
                     backend="playwright",
                     headless=True,
-                    timeout=90,
-                ),
-                timeout=AUTO_LOGIN_TIMEOUT,
+                    timeout=LOGIN_LIBRARY_TIMEOUT,
+                )
             )
+
+            try:
+
+                ssid = await asyncio.wait_for(
+                    login_task,
+                    timeout=AUTO_LOGIN_TIMEOUT,
+                )
+
+            except asyncio.TimeoutError:
+
+                logger.error(
+                    "[AUTO LOGIN] ❌ "
+                    "login() не вернул результат "
+                    "за %s секунд.",
+                    AUTO_LOGIN_TIMEOUT,
+                )
+
+                # Не пытаемся здесь делать await task:
+                # если библиотека зависла внутри браузера,
+                # это снова может зависнуть.
+
+                if not login_task.done():
+
+                    login_task.cancel()
+
+                raise
 
         except asyncio.CancelledError:
 
@@ -682,13 +814,14 @@ class PocketMarket:
         except asyncio.TimeoutError as exc:
 
             self.last_error = (
-                "Автоматическая авторизация Pocket Option "
-                f"превысила timeout "
+                "Автоматическая авторизация "
+                "Pocket Option превысила timeout "
                 f"{AUTO_LOGIN_TIMEOUT} секунд."
             )
 
             logger.error(
-                "[MARKET] AUTO LOGIN TIMEOUT."
+                "[AUTO LOGIN] ❌ %s",
+                self.last_error,
             )
 
             raise RuntimeError(
@@ -697,12 +830,19 @@ class PocketMarket:
 
         except Exception as exc:
 
-            error_text = str(exc)
-            error_lower = error_text.lower()
+            error_text = str(
+                exc
+            )
+
+            error_lower = (
+                error_text.lower()
+            )
 
             self.last_error = error_text
 
+            # ------------------------------------------------
             # CAPTCHA
+            # ------------------------------------------------
 
             if (
                 "captcha" in error_lower
@@ -710,8 +850,8 @@ class PocketMarket:
             ):
 
                 logger.error(
-                    "Pocket Option сообщил о "
-                    "CAPTCHA/дополнительной проверке."
+                    "[AUTO LOGIN] ❌ "
+                    "CAPTCHA/RECAPTCHA."
                 )
 
                 raise RuntimeError(
@@ -721,7 +861,9 @@ class PocketMarket:
                     f"Детали: {error_text}"
                 ) from exc
 
-            # Browser
+            # ------------------------------------------------
+            # BROWSER
+            # ------------------------------------------------
 
             browser_errors = (
                 "chromium distribution",
@@ -731,6 +873,8 @@ class PocketMarket:
                 "executable doesn't exist at",
                 "browser_type.launch",
                 "failed to launch",
+                "target page",
+                "browser closed",
             )
 
             if any(
@@ -739,7 +883,8 @@ class PocketMarket:
             ):
 
                 logger.error(
-                    "Ошибка браузера Playwright: %s",
+                    "[AUTO LOGIN] ❌ "
+                    "Ошибка браузера: %s",
                     error_text,
                 )
 
@@ -749,7 +894,9 @@ class PocketMarket:
                     f"Детали: {error_text}"
                 ) from exc
 
-            # Network
+            # ------------------------------------------------
+            # NETWORK
+            # ------------------------------------------------
 
             network_errors = (
                 "firewall",
@@ -758,6 +905,9 @@ class PocketMarket:
                 "timed out",
                 "timeout",
                 "net::",
+                "dns",
+                "connection refused",
+                "connection reset",
             )
 
             if any(
@@ -766,20 +916,22 @@ class PocketMarket:
             ):
 
                 logger.error(
-                    "Ошибка сетевого подключения "
-                    "Pocket Option: %s",
+                    "[AUTO LOGIN] ❌ "
+                    "Сетевая ошибка: %s",
                     error_text,
                 )
 
                 raise RuntimeError(
-                    "Pocket Option недоступен из "
-                    "окружения Render или соединение "
-                    "завершилось по timeout. "
+                    "Pocket Option недоступен "
+                    "из окружения Render или "
+                    "соединение завершилось "
+                    "по timeout. "
                     f"Детали: {error_text}"
                 ) from exc
 
             logger.exception(
-                "Pocket Option automatic login failed"
+                "[AUTO LOGIN] ❌ "
+                "Pocket Option automatic login failed."
             )
 
             raise RuntimeError(
@@ -795,11 +947,12 @@ class PocketMarket:
         if not ssid:
 
             self.last_error = (
-                "Pocket Option login не вернул SSID."
+                "Pocket Option login "
+                "не вернул SSID."
             )
 
             raise RuntimeError(
-                "Pocket Option login не вернул SSID."
+                self.last_error
             )
 
         ssid = str(
@@ -809,14 +962,16 @@ class PocketMarket:
         if not ssid:
 
             self.last_error = (
-                "Pocket Option login вернул пустой SSID."
+                "Pocket Option login "
+                "вернул пустой SSID."
             )
 
             raise RuntimeError(
-                "Pocket Option login вернул пустой SSID."
+                self.last_error
             )
 
         logger.info(
+            "[AUTO LOGIN] ✅ "
             "Pocket Option SSID успешно получен."
         )
 
@@ -833,17 +988,23 @@ class PocketMarket:
         """
         Создаёт PocketOptionAsync вне event loop.
 
-        Это критическое исправление:
-        старый код выполнял PocketOptionAsync(ssid)
-        прямо внутри asyncio.
-
-        Если библиотека зависает при создании WebSocket,
-        Telegram-бот больше не блокирует event loop.
+        Конструктор библиотеки может автоматически
+        устанавливать WebSocket-соединение.
         """
 
-        from BinaryOptionsToolsV2.pocketoption import (
-            PocketOptionAsync,
-        )
+        try:
+
+            from BinaryOptionsToolsV2.pocketoption import (
+                PocketOptionAsync,
+            )
+
+        except Exception as exc:
+
+            raise RuntimeError(
+                "BinaryOptionsToolsV2 "
+                "не импортируется: "
+                f"{exc}"
+            ) from exc
 
         logger.info(
             "[MARKET] Создание PocketOptionAsync "
@@ -913,12 +1074,9 @@ class PocketMarket:
         """
         Безопасный вызов метода библиотеки.
 
-        Поддерживает:
-        - async методы
-        - sync методы
+        Async → выполняется напрямую.
 
-        Sync методы запускаются в thread,
-        чтобы не блокировать Telegram bot.
+        Sync → выполняется через thread.
         """
 
         try:
@@ -942,15 +1100,11 @@ class PocketMarket:
 
                 return result
 
-            async def run_sync():
-
-                return await asyncio.to_thread(
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
                     method,
                     *args,
-                )
-
-            result = await asyncio.wait_for(
-                run_sync(),
+                ),
                 timeout=timeout,
             )
 
@@ -990,8 +1144,6 @@ class PocketMarket:
 
         1. PO_SSID
         2. PO_EMAIL + PO_PASSWORD
-
-        Весь потенциально блокирующий код защищён timeout.
         """
 
         async with self.lock:
@@ -1049,7 +1201,7 @@ class PocketMarket:
 
                     ssid = await asyncio.wait_for(
                         self.auto_login(),
-                        timeout=AUTO_LOGIN_TIMEOUT,
+                        timeout=AUTO_LOGIN_TIMEOUT + 10,
                     )
 
                 except asyncio.CancelledError:
@@ -1080,7 +1232,7 @@ class PocketMarket:
                     ) from exc
 
             # =================================================
-            # STEP 2 — SSID VALIDATION
+            # STEP 2 — SSID
             # =================================================
 
             if not ssid:
@@ -1138,13 +1290,14 @@ class PocketMarket:
             )
 
             # =================================================
-            # STEP 4 — WEBSOCKET INIT
+            # STEP 4 — WEBSOCKET
             # =================================================
 
             logger.info(
                 "[MARKET] STEP 4/5: "
                 "Ожидание инициализации "
-                "Pocket Option WebSocket (%s сек.)...",
+                "Pocket Option WebSocket "
+                "(%s сек.)...",
                 WEBSOCKET_INIT_DELAY,
             )
 
@@ -1185,7 +1338,9 @@ class PocketMarket:
                     await self._call_method(
                         balance_method,
                         timeout=BALANCE_TIMEOUT,
-                        method_name="Pocket Option balance()",
+                        method_name=(
+                            "Pocket Option balance()"
+                        ),
                     )
 
                     logger.info(
@@ -1207,13 +1362,10 @@ class PocketMarket:
                         health_exc,
                     )
 
-                    # ВАЖНО:
+                    # Не уничтожаем клиент.
                     #
-                    # balance() может быть несовместим
-                    # с конкретной версией библиотеки.
-                    #
-                    # Поэтому не уничтожаем соединение
-                    # автоматически.
+                    # В некоторых версиях библиотеки
+                    # balance может работать иначе.
 
             else:
 
@@ -1663,6 +1815,8 @@ class PocketMarket:
             "get_history",
         )
 
+        last_error: Exception | None = None
+
         for method_name in methods:
 
             method = getattr(
@@ -1720,11 +1874,14 @@ class PocketMarket:
 
                     raise
 
-                except TypeError:
+                except TypeError as exc:
 
+                    last_error = exc
                     continue
 
                 except Exception as exc:
+
+                    last_error = exc
 
                     logger.warning(
                         "Market method %s failed: %s",
@@ -1733,6 +1890,14 @@ class PocketMarket:
                     )
 
                     continue
+
+        if last_error is not None:
+
+            raise RuntimeError(
+                "Не удалось получить свечи "
+                "через BinaryOptionsToolsV2: "
+                f"{last_error}"
+            ) from last_error
 
         raise RuntimeError(
             "BinaryOptionsToolsV2 не предоставил "
@@ -1939,13 +2104,25 @@ class PocketMarket:
 
             if not self.is_connected:
 
+                # auto_login может занимать до 120 сек.
+                # Поэтому старый timeout 60 сек был неправильным.
+                market_connect_timeout = (
+                    AUTO_LOGIN_TIMEOUT
+                    + CONNECT_TIMEOUT
+                    + BALANCE_TIMEOUT
+                    + MARKET_TEST_CONNECT_EXTRA
+                )
+
+                logger.info(
+                    "[MARKET TEST] "
+                    "Ожидаемый connect timeout: "
+                    "%s сек.",
+                    market_connect_timeout,
+                )
+
                 await asyncio.wait_for(
                     self.connect(),
-                    timeout=(
-                        CONNECT_TIMEOUT
-                        + BALANCE_TIMEOUT
-                        + 15
-                    ),
+                    timeout=market_connect_timeout,
                 )
 
             candles = await asyncio.wait_for(
