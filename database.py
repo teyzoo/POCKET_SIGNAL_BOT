@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -16,11 +17,13 @@ from sqlalchemy import (
     func,
     select,
 )
+
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -36,7 +39,7 @@ logger = logging.getLogger(
 
 
 # ============================================================
-# DATABASE ENGINE
+# ENGINE
 # ============================================================
 
 engine = create_async_engine(
@@ -122,30 +125,17 @@ class User(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(
+            timezone.utc
+        ),
         nullable=False,
     )
 
-    # --------------------------------------------------------
-    # LAST SEEN
-    # --------------------------------------------------------
-    #
-    # В текущей PostgreSQL базе эта колонка уже существует
-    # и имеет NOT NULL.
-    #
-    # Раньше модель User её не содержала, из-за чего INSERT
-    # нового пользователя завершался:
-    #
-    # NotNullViolationError:
-    # null value in column "last_seen"
-    #
-    # Теперь поле есть и будет автоматически обновляться
-    # при каждом вызове ensure_user().
-    #
-
     last_seen: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(
+            timezone.utc
+        ),
         nullable=False,
     )
 
@@ -166,11 +156,13 @@ class Signal(Base):
     pair: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
+        index=True,
     )
 
     timeframe: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
+        index=True,
     )
 
     direction: Mapped[str] = mapped_column(
@@ -178,6 +170,8 @@ class Signal(Base):
         nullable=False,
     )
 
+    # Техническая уверенность.
+    # НЕ winrate.
     probability: Mapped[float] = mapped_column(
         Float,
         nullable=False,
@@ -191,21 +185,39 @@ class Signal(Base):
     entry_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+        index=True,
     )
 
     close_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+        index=True,
     )
 
+    # PENDING / WIN / LOSS
     status: Mapped[str] = mapped_column(
         String(16),
         default="PENDING",
         nullable=False,
+        index=True,
     )
 
+    # WIN / LOSS
     result: Mapped[Optional[str]] = mapped_column(
         String(16),
+        nullable=True,
+        index=True,
+    )
+
+    # Фактическая цена входа.
+    entry_price: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    # Фактическая цена закрытия.
+    close_price: Mapped[Optional[float]] = mapped_column(
+        Float,
         nullable=True,
     )
 
@@ -217,7 +229,7 @@ class Signal(Base):
 
 
 # ============================================================
-# INIT DATABASE
+# INIT
 # ============================================================
 
 async def init_db():
@@ -228,23 +240,15 @@ async def init_db():
 
     async with engine.begin() as connection:
 
-        # ----------------------------------------------------
-        # CREATE TABLES
-        # ----------------------------------------------------
-
         await connection.run_sync(
             Base.metadata.create_all
         )
 
-        # ----------------------------------------------------
-        # POSTGRESQL MIGRATIONS
-        # ----------------------------------------------------
-
         if "postgresql" in config.database_url:
 
-            # =================================================
-            # TELEGRAM ID -> BIGINT
-            # =================================================
+            # ------------------------------------------------
+            # telegram_id BIGINT
+            # ------------------------------------------------
 
             try:
 
@@ -276,20 +280,15 @@ async def init_db():
             except Exception as exc:
 
                 logger.warning(
-                    "[DATABASE] Не удалось проверить "
-                    "telegram_id: %s",
+                    "[DATABASE] telegram_id migration: %s",
                     exc,
                 )
 
-            # =================================================
-            # LAST_SEEN
-            # =================================================
+            # ------------------------------------------------
+            # last_seen
+            # ------------------------------------------------
 
             try:
-
-                # ------------------------------------------------
-                # Проверяем, существует ли last_seen
-                # ------------------------------------------------
 
                 result = await connection.exec_driver_sql(
                     """
@@ -305,16 +304,7 @@ async def init_db():
 
                 row = result.first()
 
-                # ------------------------------------------------
-                # Если колонки нет — создаём
-                # ------------------------------------------------
-
                 if row is None:
-
-                    logger.warning(
-                        "[DATABASE] Колонка users.last_seen "
-                        "отсутствует. Создаю..."
-                    )
 
                     await connection.exec_driver_sql(
                         """
@@ -324,10 +314,6 @@ async def init_db():
                         """
                     )
 
-                    # --------------------------------------------
-                    # Заполняем существующие записи
-                    # --------------------------------------------
-
                     await connection.exec_driver_sql(
                         """
                         UPDATE users
@@ -339,10 +325,6 @@ async def init_db():
                         """
                     )
 
-                    # --------------------------------------------
-                    # Устанавливаем default
-                    # --------------------------------------------
-
                     await connection.exec_driver_sql(
                         """
                         ALTER TABLE users
@@ -350,10 +332,6 @@ async def init_db():
                         SET DEFAULT NOW();
                         """
                     )
-
-                    # --------------------------------------------
-                    # Теперь делаем NOT NULL
-                    # --------------------------------------------
 
                     await connection.exec_driver_sql(
                         """
@@ -363,25 +341,7 @@ async def init_db():
                         """
                     )
 
-                    logger.info(
-                        "[DATABASE] ✅ users.last_seen "
-                        "создан и настроен."
-                    )
-
                 else:
-
-                    # ------------------------------------------------
-                    # Колонка уже существует
-                    # ------------------------------------------------
-
-                    logger.info(
-                        "[DATABASE] users.last_seen "
-                        "уже существует."
-                    )
-
-                    # --------------------------------------------
-                    # Исправляем NULL, если такие есть
-                    # --------------------------------------------
 
                     await connection.exec_driver_sql(
                         """
@@ -394,10 +354,6 @@ async def init_db():
                         """
                     )
 
-                    # --------------------------------------------
-                    # Ставим DEFAULT
-                    # --------------------------------------------
-
                     await connection.exec_driver_sql(
                         """
                         ALTER TABLE users
@@ -405,10 +361,6 @@ async def init_db():
                         SET DEFAULT NOW();
                         """
                     )
-
-                    # --------------------------------------------
-                    # Убеждаемся, что NOT NULL установлен
-                    # --------------------------------------------
 
                     if row.is_nullable == "YES":
 
@@ -420,17 +372,41 @@ async def init_db():
                             """
                         )
 
-                        logger.info(
-                            "[DATABASE] "
-                            "users.last_seen установлен "
-                            "как NOT NULL."
-                        )
+            except Exception as exc:
+
+                logger.exception(
+                    "[DATABASE] last_seen migration: %s",
+                    exc,
+                )
+
+                raise
+
+            # ------------------------------------------------
+            # SIGNAL EXTRA COLUMNS
+            # ------------------------------------------------
+
+            try:
+
+                await connection.exec_driver_sql(
+                    """
+                    ALTER TABLE signals
+                    ADD COLUMN IF NOT EXISTS
+                    entry_price DOUBLE PRECISION;
+                    """
+                )
+
+                await connection.exec_driver_sql(
+                    """
+                    ALTER TABLE signals
+                    ADD COLUMN IF NOT EXISTS
+                    close_price DOUBLE PRECISION;
+                    """
+                )
 
             except Exception as exc:
 
                 logger.exception(
-                    "[DATABASE] ❌ Ошибка миграции "
-                    "users.last_seen: %s",
+                    "[DATABASE] signal price migration: %s",
                     exc,
                 )
 
@@ -438,6 +414,19 @@ async def init_db():
 
     logger.info(
         "[DATABASE] ✅ PostgreSQL готов."
+    )
+
+
+# ============================================================
+# CLOSE DATABASE
+# ============================================================
+
+async def close_database():
+
+    await engine.dispose()
+
+    logger.info(
+        "[DATABASE] Соединения закрыты."
     )
 
 
@@ -460,22 +449,13 @@ async def ensure_user(
         user = (
             await session.execute(
                 select(User).where(
-                    User.telegram_id == telegram_id
+                    User.telegram_id
+                    == telegram_id
                 )
             )
         ).scalar_one_or_none()
 
-        # ====================================================
-        # NEW USER
-        # ====================================================
-
         if user is None:
-
-            logger.info(
-                "[DATABASE] Создаю нового пользователя "
-                "telegram_id=%s",
-                telegram_id,
-            )
 
             user = User(
                 telegram_id=telegram_id,
@@ -491,10 +471,6 @@ async def ensure_user(
             )
 
             session.add(user)
-
-        # ====================================================
-        # EXISTING USER
-        # ====================================================
 
         else:
 
@@ -520,7 +496,8 @@ async def get_user(
         return (
             await session.execute(
                 select(User).where(
-                    User.telegram_id == telegram_id
+                    User.telegram_id
+                    == telegram_id
                 )
             )
         ).scalar_one_or_none()
@@ -540,12 +517,13 @@ async def update_user(
         user = (
             await session.execute(
                 select(User).where(
-                    User.telegram_id == telegram_id
+                    User.telegram_id
+                    == telegram_id
                 )
             )
         ).scalar_one_or_none()
 
-        if not user:
+        if user is None:
             return
 
         for key, value in values.items():
@@ -561,7 +539,6 @@ async def update_user(
                     value,
                 )
 
-        # Обновляем last_seen при изменении пользователя
         user.last_seen = datetime.now(
             timezone.utc
         )
@@ -570,7 +547,7 @@ async def update_user(
 
 
 # ============================================================
-# GET ACCESS USERS
+# ACCESS USERS
 # ============================================================
 
 async def get_access_users() -> list[User]:
@@ -602,6 +579,7 @@ async def save_signal(
     entry_time: datetime,
     close_time: datetime,
     reasons: list[str],
+    entry_price: float | None = None,
 ):
 
     async with Session() as session:
@@ -610,12 +588,18 @@ async def save_signal(
             pair=pair,
             timeframe=timeframe,
             direction=direction,
-            probability=probability,
-            quality=quality,
+            probability=float(
+                probability
+            ),
+            quality=float(
+                quality
+            ),
             entry_time=entry_time,
             close_time=close_time,
             status="PENDING",
             result=None,
+            entry_price=entry_price,
+            close_price=None,
             reasons=json.dumps(
                 reasons,
                 ensure_ascii=False,
@@ -630,43 +614,42 @@ async def save_signal(
 
 
 # ============================================================
-# MARK EXPIRED SIGNALS
+# GET PENDING SIGNALS
 # ============================================================
 
-async def mark_expired_signals():
-
-    """
-    Переводит истёкшие PENDING сигналы в EXPIRED.
-
-    WIN/LOSS здесь не определяется.
-    Для WIN/LOSS необходимо сравнение направления
-    сигнала с фактической ценой закрытия.
-    """
-
-    now = datetime.now(
-        timezone.utc
-    )
+async def get_pending_signals():
 
     async with Session() as session:
 
         result = await session.execute(
-            select(Signal).where(
-                Signal.status == "PENDING",
-                Signal.close_time <= now,
+            select(Signal)
+            .where(
+                Signal.status == "PENDING"
+            )
+            .order_by(
+                Signal.close_time.asc()
             )
         )
 
-        signals = list(
+        return list(
             result.scalars().all()
         )
 
-        for signal in signals:
 
-            signal.status = "EXPIRED"
+# ============================================================
+# GET SIGNAL
+# ============================================================
 
-        await session.commit()
+async def get_signal(
+    signal_id: int,
+) -> Signal | None:
 
-        return len(signals)
+    async with Session() as session:
+
+        return await session.get(
+            Signal,
+            signal_id,
+        )
 
 
 # ============================================================
@@ -676,9 +659,12 @@ async def mark_expired_signals():
 async def set_signal_result(
     signal_id: int,
     result: str,
+    close_price: float | None = None,
 ):
 
-    result = result.upper().strip()
+    result = str(
+        result
+    ).upper().strip()
 
     if result not in {
         "WIN",
@@ -696,11 +682,25 @@ async def set_signal_result(
             signal_id,
         )
 
-        if not signal:
+        if signal is None:
+            return False
+
+        # Не разрешаем переписывать уже закрытый сигнал.
+        if signal.status in {
+            "WIN",
+            "LOSS",
+        }:
+
             return False
 
         signal.result = result
         signal.status = result
+
+        if close_price is not None:
+
+            signal.close_price = float(
+                close_price
+            )
 
         await session.commit()
 
@@ -708,7 +708,75 @@ async def set_signal_result(
 
 
 # ============================================================
-# SIGNAL STATS
+# SETTLE SIGNAL BY PRICE
+# ============================================================
+
+async def settle_signal_by_price(
+    signal_id: int,
+    close_price: float,
+) -> str | None:
+
+    async with Session() as session:
+
+        signal = await session.get(
+            Signal,
+            signal_id,
+        )
+
+        if signal is None:
+            return None
+
+        if signal.status != "PENDING":
+            return signal.result
+
+        if signal.entry_price is None:
+            return None
+
+        entry_price = float(
+            signal.entry_price
+        )
+
+        close_price = float(
+            close_price
+        )
+
+        if close_price == entry_price:
+            # Ничья не считается WIN.
+            # Оставляем сигнал PENDING,
+            # чтобы не искажать winrate.
+            return None
+
+        if signal.direction.upper() == "UP":
+
+            result = (
+                "WIN"
+                if close_price > entry_price
+                else "LOSS"
+            )
+
+        elif signal.direction.upper() == "DOWN":
+
+            result = (
+                "WIN"
+                if close_price < entry_price
+                else "LOSS"
+            )
+
+        else:
+
+            return None
+
+        signal.result = result
+        signal.status = result
+        signal.close_price = close_price
+
+        await session.commit()
+
+        return result
+
+
+# ============================================================
+# REAL WINRATE
 # ============================================================
 
 async def get_signal_stats():
@@ -718,7 +786,9 @@ async def get_signal_stats():
         total = (
             await session.scalar(
                 select(
-                    func.count(Signal.id)
+                    func.count(
+                        Signal.id
+                    )
                 )
             )
             or 0
@@ -727,7 +797,9 @@ async def get_signal_stats():
         wins = (
             await session.scalar(
                 select(
-                    func.count(Signal.id)
+                    func.count(
+                        Signal.id
+                    )
                 ).where(
                     Signal.result == "WIN"
                 )
@@ -738,7 +810,9 @@ async def get_signal_stats():
         losses = (
             await session.scalar(
                 select(
-                    func.count(Signal.id)
+                    func.count(
+                        Signal.id
+                    )
                 ).where(
                     Signal.result == "LOSS"
                 )
@@ -750,66 +824,113 @@ async def get_signal_stats():
             wins + losses
         )
 
-        winrate = (
-            wins / decided * 100
-            if decided
-            else 0.0
-        )
+        # ----------------------------------------------------
+        # ЭТО НАСТОЯЩИЙ WINRATE.
+        # ----------------------------------------------------
+
+        if decided > 0:
+
+            winrate = (
+                float(wins)
+                / float(decided)
+                * 100.0
+            )
+
+        else:
+
+            winrate = None
 
         return {
-            "total": total,
-            "wins": wins,
-            "losses": losses,
+            "total": int(total),
+            "wins": int(wins),
+            "losses": int(losses),
+            "decided": int(decided),
             "winrate": winrate,
-            "decided": decided,
         }
 
 
 # ============================================================
-# USER STATS
+# PAIR WINRATE
 # ============================================================
 
-async def get_user_stats():
+async def get_pair_stats():
 
     async with Session() as session:
 
-        total = (
-            await session.scalar(
-                select(
-                    func.count(User.id)
+        result = await session.execute(
+            select(
+                Signal.pair,
+                func.count(
+                    Signal.id
+                ).label("total"),
+                func.sum(
+                    func.cast(
+                        Signal.result == "WIN",
+                        Integer,
+                    )
+                ).label("wins"),
+                func.sum(
+                    func.cast(
+                        Signal.result == "LOSS",
+                        Integer,
+                    )
+                ).label("losses"),
+            )
+            .where(
+                Signal.result.in_(
+                    [
+                        "WIN",
+                        "LOSS",
+                    ]
                 )
             )
-            or 0
-        )
-
-        active = (
-            await session.scalar(
-                select(
-                    func.count(User.id)
-                ).where(
-                    User.auto_signals.is_(True),
-                    User.blocked.is_(False),
-                )
+            .group_by(
+                Signal.pair
             )
-            or 0
-        )
-
-        blocked = (
-            await session.scalar(
-                select(
-                    func.count(User.id)
-                ).where(
-                    User.blocked.is_(True)
-                )
+            .order_by(
+                Signal.pair
             )
-            or 0
         )
 
-        return {
-            "total": total,
-            "active": active,
-            "blocked": blocked,
-        }
+        rows = result.all()
+
+        stats = []
+
+        for row in rows:
+
+            total = int(
+                row.total or 0
+            )
+
+            wins = int(
+                row.wins or 0
+            )
+
+            losses = int(
+                row.losses or 0
+            )
+
+            decided = (
+                wins + losses
+            )
+
+            winrate = (
+                wins / decided * 100.0
+                if decided
+                else None
+            )
+
+            stats.append(
+                {
+                    "pair": row.pair,
+                    "total": total,
+                    "wins": wins,
+                    "losses": losses,
+                    "winrate": winrate,
+                }
+            )
+
+        return stats
 
 
 # ============================================================
@@ -817,13 +938,13 @@ async def get_user_stats():
 # ============================================================
 
 async def get_recent_signals(
-    limit: int = 10,
+    limit: int = 20,
 ):
 
     limit = max(
         1,
         min(
-            limit,
+            int(limit),
             100,
         ),
     )
@@ -833,7 +954,7 @@ async def get_recent_signals(
         result = await session.execute(
             select(Signal)
             .order_by(
-                Signal.id.desc()
+                Signal.entry_time.desc()
             )
             .limit(limit)
         )
@@ -844,39 +965,90 @@ async def get_recent_signals(
 
 
 # ============================================================
-# PAIR STATS
+# USER STATS
 # ============================================================
 
-async def get_pair_stats():
+async def get_user_stats():
+
+    async with Session() as session:
+
+        users = (
+            await session.scalar(
+                select(
+                    func.count(
+                        User.id
+                    )
+                )
+            )
+            or 0
+        )
+
+        active = (
+            await session.scalar(
+                select(
+                    func.count(
+                        User.id
+                    )
+                ).where(
+                    User.access.is_(True),
+                    User.blocked.is_(False),
+                )
+            )
+            or 0
+        )
+
+        blocked = (
+            await session.scalar(
+                select(
+                    func.count(
+                        User.id
+                    )
+                ).where(
+                    User.blocked.is_(True)
+                )
+            )
+            or 0
+        )
+
+        return {
+            "users": int(users),
+            "active": int(active),
+            "blocked": int(blocked),
+        }
+
+
+# ============================================================
+# MARK EXPIRED
+# ============================================================
+
+async def mark_expired_signals():
+
+    """
+    ВАЖНО:
+
+    Эта функция больше НЕ превращает сигнал просто
+    в LOSS/EXPIRED только потому, что прошло время.
+
+    Сначала должен быть получен реальный close_price.
+
+    Поэтому старые PENDING сигналы здесь только
+    возвращаются для последующей обработки.
+    """
+
+    now = datetime.now(
+        timezone.utc
+    )
 
     async with Session() as session:
 
         result = await session.execute(
-            select(
-                Signal.pair,
-                func.count(Signal.id),
-            )
-            .group_by(
-                Signal.pair
-            )
-            .order_by(
-                func.count(
-                    Signal.id
-                ).desc()
+            select(Signal)
+            .where(
+                Signal.status == "PENDING",
+                Signal.close_time <= now,
             )
         )
 
-        return result.all()
-
-
-# ============================================================
-# CLOSE DATABASE
-# ============================================================
-
-async def close_database():
-
-    await engine.dispose()
-
-    logger.info(
-        "[DATABASE] Database connection closed."
-    )
+        return list(
+            result.scalars().all()
+        )
