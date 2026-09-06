@@ -170,8 +170,8 @@ class Signal(Base):
         nullable=False,
     )
 
-    # Техническая уверенность.
-    # НЕ winrate.
+    # Только техническая уверенность.
+    # НЕ WINRATE.
     probability: Mapped[float] = mapped_column(
         Float,
         nullable=False,
@@ -209,13 +209,13 @@ class Signal(Base):
         index=True,
     )
 
-    # Фактическая цена входа.
+    # Цена на момент сигнала.
     entry_price: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,
     )
 
-    # Фактическая цена закрытия.
+    # Цена закрытия экспирации.
     close_price: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,
@@ -246,17 +246,13 @@ async def init_db():
 
         if "postgresql" in config.database_url:
 
-            # ------------------------------------------------
-            # telegram_id BIGINT
-            # ------------------------------------------------
-
+            # telegram_id
             try:
 
                 await connection.exec_driver_sql(
                     """
                     DO $$
                     BEGIN
-
                         IF EXISTS (
                             SELECT 1
                             FROM information_schema.columns
@@ -264,14 +260,11 @@ async def init_db():
                             AND column_name = 'telegram_id'
                             AND data_type <> 'bigint'
                         ) THEN
-
                             ALTER TABLE users
                             ALTER COLUMN telegram_id
                             TYPE BIGINT
                             USING telegram_id::BIGINT;
-
                         END IF;
-
                     END
                     $$;
                     """
@@ -284,10 +277,7 @@ async def init_db():
                     exc,
                 )
 
-            # ------------------------------------------------
             # last_seen
-            # ------------------------------------------------
-
             try:
 
                 result = await connection.exec_driver_sql(
@@ -314,63 +304,33 @@ async def init_db():
                         """
                     )
 
-                    await connection.exec_driver_sql(
-                        """
-                        UPDATE users
-                        SET last_seen = COALESCE(
-                            created_at,
-                            NOW()
-                        )
-                        WHERE last_seen IS NULL;
-                        """
+                await connection.exec_driver_sql(
+                    """
+                    UPDATE users
+                    SET last_seen = COALESCE(
+                        last_seen,
+                        created_at,
+                        NOW()
                     )
+                    WHERE last_seen IS NULL;
+                    """
+                )
 
-                    await connection.exec_driver_sql(
-                        """
-                        ALTER TABLE users
-                        ALTER COLUMN last_seen
-                        SET DEFAULT NOW();
-                        """
-                    )
+                await connection.exec_driver_sql(
+                    """
+                    ALTER TABLE users
+                    ALTER COLUMN last_seen
+                    SET DEFAULT NOW();
+                    """
+                )
 
-                    await connection.exec_driver_sql(
-                        """
-                        ALTER TABLE users
-                        ALTER COLUMN last_seen
-                        SET NOT NULL;
-                        """
-                    )
-
-                else:
-
-                    await connection.exec_driver_sql(
-                        """
-                        UPDATE users
-                        SET last_seen = COALESCE(
-                            created_at,
-                            NOW()
-                        )
-                        WHERE last_seen IS NULL;
-                        """
-                    )
-
-                    await connection.exec_driver_sql(
-                        """
-                        ALTER TABLE users
-                        ALTER COLUMN last_seen
-                        SET DEFAULT NOW();
-                        """
-                    )
-
-                    if row.is_nullable == "YES":
-
-                        await connection.exec_driver_sql(
-                            """
-                            ALTER TABLE users
-                            ALTER COLUMN last_seen
-                            SET NOT NULL;
-                            """
-                        )
+                await connection.exec_driver_sql(
+                    """
+                    ALTER TABLE users
+                    ALTER COLUMN last_seen
+                    SET NOT NULL;
+                    """
+                )
 
             except Exception as exc:
 
@@ -381,10 +341,7 @@ async def init_db():
 
                 raise
 
-            # ------------------------------------------------
-            # SIGNAL EXTRA COLUMNS
-            # ------------------------------------------------
-
+            # Signal prices
             try:
 
                 await connection.exec_driver_sql(
@@ -418,7 +375,7 @@ async def init_db():
 
 
 # ============================================================
-# CLOSE DATABASE
+# CLOSE
 # ============================================================
 
 async def close_database():
@@ -431,7 +388,7 @@ async def close_database():
 
 
 # ============================================================
-# ENSURE USER
+# USER
 # ============================================================
 
 async def ensure_user(
@@ -483,10 +440,6 @@ async def ensure_user(
         return user
 
 
-# ============================================================
-# GET USER
-# ============================================================
-
 async def get_user(
     telegram_id: int,
 ) -> User | None:
@@ -502,10 +455,6 @@ async def get_user(
             )
         ).scalar_one_or_none()
 
-
-# ============================================================
-# UPDATE USER
-# ============================================================
 
 async def update_user(
     telegram_id: int,
@@ -546,10 +495,6 @@ async def update_user(
         await session.commit()
 
 
-# ============================================================
-# ACCESS USERS
-# ============================================================
-
 async def get_access_users() -> list[User]:
 
     async with Session() as session:
@@ -567,7 +512,7 @@ async def get_access_users() -> list[User]:
 
 
 # ============================================================
-# SAVE SIGNAL
+# SIGNAL SAVE
 # ============================================================
 
 async def save_signal(
@@ -586,8 +531,8 @@ async def save_signal(
 
         signal = Signal(
             pair=pair,
-            timeframe=timeframe,
-            direction=direction,
+            timeframe=int(timeframe),
+            direction=str(direction).upper(),
             probability=float(
                 probability
             ),
@@ -598,7 +543,11 @@ async def save_signal(
             close_time=close_time,
             status="PENDING",
             result=None,
-            entry_price=entry_price,
+            entry_price=(
+                float(entry_price)
+                if entry_price is not None
+                else None
+            ),
             close_price=None,
             reasons=json.dumps(
                 reasons,
@@ -614,7 +563,7 @@ async def save_signal(
 
 
 # ============================================================
-# GET PENDING SIGNALS
+# PENDING
 # ============================================================
 
 async def get_pending_signals():
@@ -636,10 +585,6 @@ async def get_pending_signals():
         )
 
 
-# ============================================================
-# GET SIGNAL
-# ============================================================
-
 async def get_signal(
     signal_id: int,
 ) -> Signal | None:
@@ -653,7 +598,7 @@ async def get_signal(
 
 
 # ============================================================
-# SET SIGNAL RESULT
+# RESULT
 # ============================================================
 
 async def set_signal_result(
@@ -685,7 +630,6 @@ async def set_signal_result(
         if signal is None:
             return False
 
-        # Не разрешаем переписывать уже закрытый сигнал.
         if signal.status in {
             "WIN",
             "LOSS",
@@ -706,10 +650,6 @@ async def set_signal_result(
 
         return True
 
-
-# ============================================================
-# SETTLE SIGNAL BY PRICE
-# ============================================================
 
 async def settle_signal_by_price(
     signal_id: int,
@@ -741,12 +681,15 @@ async def settle_signal_by_price(
         )
 
         if close_price == entry_price:
-            # Ничья не считается WIN.
-            # Оставляем сигнал PENDING,
-            # чтобы не искажать winrate.
+            # Ничья не влияет на WINRATE.
             return None
 
-        if signal.direction.upper() == "UP":
+        direction = (
+            str(signal.direction)
+            .upper()
+        )
+
+        if direction == "UP":
 
             result = (
                 "WIN"
@@ -754,7 +697,7 @@ async def settle_signal_by_price(
                 else "LOSS"
             )
 
-        elif signal.direction.upper() == "DOWN":
+        elif direction == "DOWN":
 
             result = (
                 "WIN"
@@ -776,7 +719,7 @@ async def settle_signal_by_price(
 
 
 # ============================================================
-# REAL WINRATE
+# GLOBAL WINRATE
 # ============================================================
 
 async def get_signal_stats():
@@ -821,24 +764,17 @@ async def get_signal_stats():
         )
 
         decided = (
-            wins + losses
+            int(wins)
+            + int(losses)
         )
 
-        # ----------------------------------------------------
-        # ЭТО НАСТОЯЩИЙ WINRATE.
-        # ----------------------------------------------------
-
-        if decided > 0:
-
-            winrate = (
-                float(wins)
-                / float(decided)
-                * 100.0
-            )
-
-        else:
-
-            winrate = None
+        winrate = (
+            float(wins)
+            / float(decided)
+            * 100.0
+            if decided
+            else None
+        )
 
         return {
             "total": int(total),
@@ -898,10 +834,6 @@ async def get_pair_stats():
 
         for row in rows:
 
-            total = int(
-                row.total or 0
-            )
-
             wins = int(
                 row.wins or 0
             )
@@ -923,7 +855,9 @@ async def get_pair_stats():
             stats.append(
                 {
                     "pair": row.pair,
-                    "total": total,
+                    "total": int(
+                        row.total or 0
+                    ),
                     "wins": wins,
                     "losses": losses,
                     "winrate": winrate,
@@ -934,7 +868,7 @@ async def get_pair_stats():
 
 
 # ============================================================
-# RECENT SIGNALS
+# RECENT
 # ============================================================
 
 async def get_recent_signals(
@@ -1018,22 +952,13 @@ async def get_user_stats():
 
 
 # ============================================================
-# MARK EXPIRED
+# EXPIRED PENDING
 # ============================================================
 
 async def mark_expired_signals():
 
-    """
-    ВАЖНО:
-
-    Эта функция больше НЕ превращает сигнал просто
-    в LOSS/EXPIRED только потому, что прошло время.
-
-    Сначала должен быть получен реальный close_price.
-
-    Поэтому старые PENDING сигналы здесь только
-    возвращаются для последующей обработки.
-    """
+    # В LOSS автоматически не превращаем.
+    # Нужна фактическая цена закрытия.
 
     now = datetime.now(
         timezone.utc
