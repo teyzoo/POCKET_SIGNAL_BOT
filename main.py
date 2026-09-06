@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from zoneinfo import ZoneInfo
@@ -42,13 +42,11 @@ from database import (
     get_access_users,
     get_pair_stats,
     get_pending_signals,
-    get_recent_signals,
     get_signal_stats,
     get_user,
-    get_user_stats,
     init_db,
     save_signal,
-    set_signal_result,
+    settle_signal_by_price,
     update_user,
 )
 
@@ -115,7 +113,12 @@ USER_ANALYSIS_LOCKS: dict[
     asyncio.Lock,
 ] = {}
 
-LAST_KEYS: set[str] = set()
+# Главное исправление:
+# pair больше НЕ хранится внутри Telegram Message.
+USER_SELECTED_PAIRS: dict[
+    int,
+    str,
+] = {}
 
 
 # ============================================================
@@ -191,7 +194,7 @@ async def ensure_market_ready() -> bool:
         try:
 
             logger.info(
-                "[MARKET] Подключение..."
+                "[MARKET] Подключение к источнику рынка..."
             )
 
             connected = await market.connect()
@@ -318,20 +321,31 @@ def direction_text(
 
 
 # ============================================================
-# TIME FORMAT
+# TIME
 # ============================================================
+
+def utc_time(
+    value: datetime,
+) -> datetime:
+
+    if value.tzinfo is None:
+
+        return value.replace(
+            tzinfo=timezone.utc
+        )
+
+    return value.astimezone(
+        timezone.utc
+    )
+
 
 def msk_time(
     value: datetime,
 ) -> str:
 
-    if value.tzinfo is None:
-
-        value = value.replace(
-            tzinfo=timezone.utc
-        )
-
-    return value.astimezone(
+    return utc_time(
+        value
+    ).astimezone(
         MSK
     ).strftime(
         "%H:%M"
@@ -339,10 +353,105 @@ def msk_time(
 
 
 # ============================================================
+# CLOSE PRICE FROM M1
+# ============================================================
+
+def candle_close_at_or_before(
+    candles,
+    target_time: datetime,
+) -> float | None:
+
+    if not candles:
+        return None
+
+    target_time = utc_time(
+        target_time
+    )
+
+    valid = []
+
+    for candle in candles:
+
+        candle_start = utc_time(
+            candle.time
+        )
+
+        candle_close = (
+            candle_start
+            + timedelta(
+                minutes=1
+            )
+        )
+
+        # Берём только полностью закрытую M1-свечу,
+        # которая завершилась не позже целевого момента.
+        if candle_close <= target_time:
+
+            valid.append(
+                candle
+            )
+
+    if not valid:
+        return None
+
+    candle = max(
+        valid,
+        key=lambda x: utc_time(
+            x.time
+        ),
+    )
+
+    return float(
+        candle.close
+    )
+
+
+# ============================================================
 # SIGNAL FORMAT
 # ============================================================
 
-def format_signal(
+async def pair_history_text(
+    pair: str,
+) -> str:
+
+    try:
+
+        stats = await get_pair_stats()
+
+        for item in stats:
+
+            if item["pair"] != pair:
+                continue
+
+            decided = (
+                item["wins"]
+                + item["losses"]
+            )
+
+            if decided <= 0:
+                break
+
+            return (
+                f"📊 <b>История пары:</b> "
+                f"{item['winrate']:.1f}% "
+                f"({item['wins']} WIN / "
+                f"{item['losses']} LOSS)"
+            )
+
+    except Exception as exc:
+
+        logger.warning(
+            "[STATS] %s",
+            exc,
+        )
+
+    return (
+        "📊 <b>История пары:</b> "
+        "недостаточно закрытых сигналов"
+    )
+
+
+async def format_signal(
     signal,
 ) -> str:
 
@@ -358,6 +467,10 @@ def format_signal(
     reasons_text = "\n".join(
         f"• {reason}"
         for reason in reasons[:8]
+    )
+
+    history = await pair_history_text(
+        signal.pair
     )
 
     text = (
@@ -381,7 +494,9 @@ def format_signal(
         "🕐 <b>Вход:</b> ПО ЗАЯВКЕ\n"
 
         f"⏰ <b>Закрытие:</b> "
-        f"{msk_time(signal.close_time)} МСК"
+        f"{msk_time(signal.close_time)} МСК\n\n"
+
+        f"{history}"
     )
 
     if reasons_text:
@@ -434,7 +549,7 @@ def main_keyboard():
 
 
 # ============================================================
-# SIGNAL PAIR KEYBOARD
+# PAIR KEYBOARD
 # ============================================================
 
 def signal_pair_keyboard():
@@ -462,11 +577,9 @@ def signal_pair_keyboard():
         if len(row) == 2:
 
             rows.append(row)
-
             row = []
 
     if row:
-
         rows.append(row)
 
     rows.append(
@@ -490,7 +603,6 @@ def signal_pair_keyboard():
 def signal_time_keyboard():
 
     rows = []
-
     row = []
 
     for timeframe in get_config_timeframes():
@@ -505,11 +617,9 @@ def signal_time_keyboard():
         if len(row) == 3:
 
             rows.append(row)
-
             row = []
 
     if row:
-
         rows.append(row)
 
     rows.append(
@@ -560,6 +670,30 @@ async def safe_callback_answer(
         )
 
 
+async def safe_edit(
+    message: Message,
+    text: str,
+    reply_markup=None,
+):
+
+    try:
+
+        await message.edit_text(
+            text,
+            reply_markup=reply_markup,
+        )
+
+    except Exception as exc:
+
+        # Telegram возвращает ошибку, если текст не изменился.
+        if "message is not modified" not in str(exc).lower():
+
+            logger.debug(
+                "[TELEGRAM] edit error: %s",
+                exc,
+            )
+
+
 # ============================================================
 # USER LOCK
 # ============================================================
@@ -594,11 +728,15 @@ async def start_handler(
     message: Message,
 ):
 
-    user = await ensure_user(
+    await ensure_user(
         telegram_id=message.from_user.id,
         username=message.from_user.username,
         first_name=message.from_user.first_name,
     )
+
+    USER_SELECTED_PAIRS[
+        message.from_user.id
+    ] = "ANY"
 
     await message.answer(
         (
@@ -627,13 +765,14 @@ async def signal_button(
 
     if callback.message:
 
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             (
                 "📈 <b>ВЫБЕРИТЕ ПАРУ</b>\n\n"
                 "Выберите конкретную OTC-пару "
                 "или автоматический поиск."
             ),
-            reply_markup=signal_pair_keyboard(),
+            signal_pair_keyboard(),
         )
 
 
@@ -657,20 +796,22 @@ async def signal_pair(
         1,
     )[1]
 
+    USER_SELECTED_PAIRS[
+        callback.from_user.id
+    ] = pair
+
     if callback.message:
 
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             (
                 "⏱ <b>ВЫБЕРИТЕ ЭКСПИРАЦИЮ</b>\n\n"
                 f"💱 Пара: "
-                f"{'Любая' if pair == 'ANY' else pair_name(pair)}\n\n"
+                f"{'ЛЮБАЯ' if pair == 'ANY' else pair_name(pair)}\n\n"
                 "Вход выполняется ПО ЗАЯВКЕ."
             ),
-            reply_markup=signal_time_keyboard(),
+            signal_time_keyboard(),
         )
-
-        # Сохраняем выбранную пару в callback message
-        callback.message._signal_pair = pair
 
 
 # ============================================================
@@ -704,68 +845,72 @@ async def signal_time(
 
     user_id = callback.from_user.id
 
+    selected_pair = USER_SELECTED_PAIRS.get(
+        user_id,
+        "ANY",
+    )
+
     lock = get_user_lock(
         user_id
     )
 
     async with lock:
 
-        await callback.message.edit_text(
-            (
-                "🔎 <b>ПРОВЕРКА РЫНКА</b>\n\n"
-                "⏳ Получаю актуальные свечи...\n\n"
-                "📊 Анализирую технические условия."
-            )
-        )
-
-        try:
-
-            if not await ensure_market_ready():
-
-                await callback.message.edit_text(
-                    (
-                        "❌ <b>РЫНОК НЕДОСТУПЕН</b>\n\n"
-                        "Не удалось подключиться "
-                        "к рыночному источнику."
-                    ),
-                    reply_markup=main_keyboard(),
-                )
-
-                return
+        if timeframe is None:
 
             user = await get_user(
                 user_id
             )
 
-            selected_pair = getattr(
-                callback.message,
-                "_signal_pair",
-                "ANY",
+            timeframe = (
+                int(user.timeframe)
+                if user is not None
+                else 5
             )
 
-            if user is not None:
+        if selected_pair == "ANY":
 
-                selected_pair = (
-                    user.pair
-                    if user.pair != "ANY"
-                    else selected_pair
+            pair_label = "ЛЮБАЯ"
+
+        else:
+
+            pair_label = pair_name(
+                selected_pair
+            )
+
+        await safe_edit(
+            callback.message,
+            (
+                "🔎 <b>ПРОВЕРКА РЫНКА</b>\n\n"
+                f"💱 Пара: {pair_label}\n"
+                f"⏱ Экспирация: {timeframe} мин\n\n"
+                "🔌 Подключение к рынку... ⏳\n"
+                "📥 Получение свечей... ⏳\n"
+                "📊 Проверка закрытых свечей... ⏳\n"
+                "🧮 Расчёт индикаторов... ⏳\n"
+                "🎯 Поиск сильного сигнала... ⏳"
+            )
+        )
+
+        try:
+
+            # ------------------------------------------------
+            # CONNECT
+            # ------------------------------------------------
+
+            if not await ensure_market_ready():
+
+                await safe_edit(
+                    callback.message,
+                    (
+                        "❌ <b>РЫНОК НЕДОСТУПЕН</b>\n\n"
+                        "Не удалось подключиться "
+                        "к источнику рыночных данных."
+                    ),
+                    main_keyboard(),
                 )
 
-            # ------------------------------------------------
-            # TIMEFRAME
-            # ------------------------------------------------
-
-            if timeframe is None:
-
-                if user is not None:
-
-                    timeframe = int(
-                        user.timeframe
-                    )
-
-                else:
-
-                    timeframe = 5
+                return
 
             # ------------------------------------------------
             # PAIRS
@@ -785,7 +930,11 @@ async def signal_time(
                     selected_pair
                 ]
 
+            total = len(pairs)
+            checked = 0
+
             found_signal = None
+            found_candles = None
 
             # ------------------------------------------------
             # SCAN
@@ -794,6 +943,18 @@ async def signal_time(
             for pair in pairs:
 
                 try:
+
+                    await safe_edit(
+                        callback.message,
+                        (
+                            "🔎 <b>ПРОВЕРКА РЫНКА</b>\n\n"
+                            f"💱 Пара: {pair_name(pair)}\n"
+                            f"⏱ Экспирация: {timeframe} мин\n\n"
+                            "🔌 Подключение к рынку... ✅\n"
+                            f"📥 Получение свечей... ⏳\n\n"
+                            f"📊 Проверено: {checked}/{total}"
+                        )
+                    )
 
                     candles = await market.candles(
                         pair,
@@ -808,7 +969,21 @@ async def signal_time(
 
                     if not candles:
 
+                        checked += 1
                         continue
+
+                    await safe_edit(
+                        callback.message,
+                        (
+                            "🔎 <b>ПРОВЕРКА РЫНКА</b>\n\n"
+                            f"💱 Пара: {pair_name(pair)}\n"
+                            f"⏱ Экспирация: {timeframe} мин\n\n"
+                            "🔌 Подключение к рынку... ✅\n"
+                            "📥 Получение свечей... ✅\n"
+                            "📊 Проверка закрытых свечей... ⏳\n"
+                            f"\n📊 Проверено: {checked}/{total}"
+                        )
+                    )
 
                     signal = engine.analyze(
                         pair,
@@ -816,10 +991,27 @@ async def signal_time(
                         candles,
                     )
 
+                    checked += 1
+
                     if signal is None:
+
+                        await safe_edit(
+                            callback.message,
+                            (
+                                "🔎 <b>ПРОВЕРКА РЫНКА</b>\n\n"
+                                f"💱 Последняя пара: "
+                                f"{pair_name(pair)}\n"
+                                f"⏱ Экспирация: {timeframe} мин\n\n"
+                                "📊 Проверка закрытых свечей... ✅\n"
+                                "🧮 Расчёт индикаторов... ✅\n"
+                                "🎯 Сильного сигнала на этой паре нет.\n\n"
+                                f"📊 Проверено: {checked}/{total}"
+                            )
+                        )
 
                         continue
 
+                    # Выбираем самый качественный сигнал.
                     if (
                         found_signal is None
                         or signal.quality
@@ -827,8 +1019,11 @@ async def signal_time(
                     ):
 
                         found_signal = signal
+                        found_candles = candles
 
                 except Exception as exc:
+
+                    checked += 1
 
                     logger.exception(
                         "[SIGNAL] %s error: %s",
@@ -844,15 +1039,78 @@ async def signal_time(
 
             if found_signal is None:
 
-                await callback.message.edit_text(
+                await safe_edit(
+                    callback.message,
                     (
                         "⚪ <b>СИЛЬНОГО СИГНАЛА СЕЙЧАС НЕТ.</b>\n\n"
-                        f"💱 {selected_pair}\n"
+                        f"💱 {pair_label}\n"
                         f"⏱ Экспирация: {timeframe} мин\n\n"
-                        "Я не буду выдавать слабый сигнал "
-                        "только ради того, чтобы что-то показать."
+                        f"📊 Проверено пар: {checked}/{total}\n\n"
+                        "Слабый сигнал не выдаю — "
+                        "это сделано специально, чтобы "
+                        "не искажать статистику."
                     ),
-                    reply_markup=main_keyboard(),
+                    main_keyboard(),
+                )
+
+                return
+
+            # ------------------------------------------------
+            # ENTRY PRICE
+            # ------------------------------------------------
+
+            entry_price = (
+                getattr(
+                    found_signal,
+                    "entry_price",
+                    None,
+                )
+            )
+
+            if entry_price is None and found_candles:
+
+                # Резервный способ.
+                valid = []
+
+                for candle in found_candles:
+
+                    start = utc_time(
+                        candle.time
+                    )
+
+                    if (
+                        start
+                        + timedelta(minutes=1)
+                        <= found_signal.entry_time
+                    ):
+
+                        valid.append(
+                            candle
+                        )
+
+                if valid:
+
+                    last = max(
+                        valid,
+                        key=lambda x: utc_time(
+                            x.time
+                        ),
+                    )
+
+                    entry_price = float(
+                        last.close
+                    )
+
+            if entry_price is None:
+
+                await safe_edit(
+                    callback.message,
+                    (
+                        "⚠️ <b>СИГНАЛ НЕ СОХРАНЁН</b>\n\n"
+                        "Не удалось получить "
+                        "надёжную цену входа."
+                    ),
+                    main_keyboard(),
                 )
 
                 return
@@ -860,23 +1118,6 @@ async def signal_time(
             # ------------------------------------------------
             # SAVE
             # ------------------------------------------------
-
-            # Цена входа берётся из последней закрытой свечи.
-            # Это фактическая цена, используемая для будущего
-            # определения WIN/LOSS.
-
-            candles = await market.candles(
-                found_signal.pair,
-                limit=5,
-            )
-
-            entry_price = None
-
-            if candles:
-
-                entry_price = float(
-                    candles[-1].close
-                )
 
             signal_id = await save_signal(
                 pair=found_signal.pair,
@@ -890,21 +1131,28 @@ async def signal_time(
                 entry_price=entry_price,
             )
 
-            LAST_KEYS.add(
-                f"signal:{signal_id}"
+            logger.info(
+                "[SIGNAL] saved id=%s pair=%s direction=%s "
+                "entry=%s close=%s",
+                signal_id,
+                found_signal.pair,
+                found_signal.direction,
+                entry_price,
+                found_signal.close_time,
             )
 
             # ------------------------------------------------
             # SEND
             # ------------------------------------------------
 
-            text = format_signal(
+            text = await format_signal(
                 found_signal
             )
 
-            await callback.message.edit_text(
+            await safe_edit(
+                callback.message,
                 text,
-                reply_markup=main_keyboard(),
+                main_keyboard(),
             )
 
         except Exception as exc:
@@ -914,12 +1162,13 @@ async def signal_time(
                 exc,
             )
 
-            await callback.message.edit_text(
+            await safe_edit(
+                callback.message,
                 (
                     "❌ <b>ОШИБКА АНАЛИЗА</b>\n\n"
                     f"<code>{str(exc)[:500]}</code>"
                 ),
-                reply_markup=main_keyboard(),
+                main_keyboard(),
             )
 
 
@@ -950,7 +1199,8 @@ async def settings_button(
 
         return
 
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         (
             "⚙️ <b>НАСТРОЙКИ</b>\n\n"
             f"💱 Пара: {user.pair}\n"
@@ -958,12 +1208,12 @@ async def settings_button(
             f"🤖 Автосигналы: "
             f"{'ВКЛ' if user.auto_signals else 'ВЫКЛ'}"
         ),
-        reply_markup=main_keyboard(),
+        main_keyboard(),
     )
 
 
 # ============================================================
-# AUTO TOGGLE
+# AUTO
 # ============================================================
 
 @dp.callback_query(
@@ -984,18 +1234,21 @@ async def auto_toggle(
     if user is None:
         return
 
+    new_value = not user.auto_signals
+
     await update_user(
         callback.from_user.id,
-        auto_signals=not user.auto_signals,
+        auto_signals=new_value,
     )
 
-    await callback.message.edit_text(
+    await safe_edit(
+        callback.message,
         (
             "🤖 <b>Автосигналы</b>\n\n"
             f"Статус: "
-            f"{'🟢 ВКЛЮЧЕНЫ' if not user.auto_signals else '🔴 ВЫКЛЮЧЕНЫ'}"
+            f"{'🟢 ВКЛЮЧЕНЫ' if new_value else '🔴 ВЫКЛЮЧЕНЫ'}"
         ),
-        reply_markup=main_keyboard(),
+        main_keyboard(),
     )
 
 
@@ -1014,40 +1267,34 @@ async def back_main(
         callback
     )
 
+    USER_SELECTED_PAIRS[
+        callback.from_user.id
+    ] = "ANY"
+
     if callback.message:
 
-        await callback.message.edit_text(
+        await safe_edit(
+            callback.message,
             (
                 "📈 <b>POCKET SIGNAL BOT</b>\n\n"
                 "Выберите действие:"
             ),
-            reply_markup=main_keyboard(),
+            main_keyboard(),
         )
 
 
 # ============================================================
-# HONEST WINRATE
+# WINRATE
 # ============================================================
 
 async def get_winrate_text():
 
     stats = await get_signal_stats()
 
-    decided = stats[
-        "decided"
-    ]
-
-    wins = stats[
-        "wins"
-    ]
-
-    losses = stats[
-        "losses"
-    ]
-
-    winrate = stats[
-        "winrate"
-    ]
+    decided = stats["decided"]
+    wins = stats["wins"]
+    losses = stats["losses"]
+    winrate = stats["winrate"]
 
     if decided < 30:
 
@@ -1056,9 +1303,9 @@ async def get_winrate_text():
             f"✅ WIN: {wins}\n"
             f"❌ LOSS: {losses}\n"
             f"📦 Закрыто: {decided}\n\n"
-            "⏳ Недостаточно статистики.\n"
-            "Winrate будет показан после "
-            "накопления 30 закрытых сигналов."
+            "⏳ Недостаточно статистики для "
+            "надёжной оценки.\n"
+            "Ничего не подставляется искусственно."
         )
 
     return (
@@ -1067,26 +1314,22 @@ async def get_winrate_text():
         f"❌ LOSS: {losses}\n"
         f"📦 Закрыто: {decided}\n\n"
         f"🎯 <b>WINRATE: {winrate:.1f}%</b>\n\n"
-        "Расчёт выполнен только по "
-        "фактически закрытым сигналам."
+        "Расчёт только по фактически "
+        "определённым WIN/LOSS."
     )
 
 
 # ============================================================
-# SETTLE PENDING SIGNALS
+# SETTLEMENT
 # ============================================================
 
 async def settle_pending_signals():
 
     """
-    Периодическая проверка завершённых сигналов.
+    Определяет WIN/LOSS только по фактической цене
+    закрытой M1-свечи.
 
-    Здесь специально НЕ используется probability.
-
-    Результат определяется только по:
-        entry_price
-        close_price
-        direction
+    probability вообще не используется.
     """
 
     while True:
@@ -1095,9 +1338,7 @@ async def settle_pending_signals():
 
             if await ensure_market_ready():
 
-                pending = (
-                    await get_pending_signals()
-                )
+                pending = await get_pending_signals()
 
                 now = datetime.now(
                     timezone.utc
@@ -1105,7 +1346,11 @@ async def settle_pending_signals():
 
                 for signal in pending:
 
-                    if signal.close_time > now:
+                    close_time = utc_time(
+                        signal.close_time
+                    )
+
+                    if close_time > now:
                         continue
 
                     if signal.entry_price is None:
@@ -1113,65 +1358,60 @@ async def settle_pending_signals():
 
                     try:
 
-                        candles = (
-                            await market.candles(
-                                signal.pair,
-                                limit=3,
-                            )
+                        # Берём достаточно большой диапазон,
+                        # чтобы найти именно свечу окончания
+                        # экспирации.
+                        candles = await market.candles(
+                            signal.pair,
+                            limit=max(
+                                100,
+                                int(
+                                    getattr(
+                                        config,
+                                        "MARKET_CANDLE_LIMIT",
+                                        1600,
+                                    )
+                                ),
+                            ),
                         )
 
                         if not candles:
                             continue
 
-                        close_price = float(
-                            candles[-1].close
+                        close_price = candle_close_at_or_before(
+                            candles,
+                            close_time,
                         )
 
-                        entry_price = float(
-                            signal.entry_price
-                        )
+                        if close_price is None:
 
-                        if (
-                            close_price
-                            == entry_price
-                        ):
-                            continue
-
-                        if signal.direction.upper() == "UP":
-
-                            result = (
-                                "WIN"
-                                if close_price
-                                > entry_price
-                                else "LOSS"
+                            logger.warning(
+                                "[RESULT] Нет закрытой M1-свечи "
+                                "для signal=%s close=%s",
+                                signal.id,
+                                close_time,
                             )
-
-                        elif signal.direction.upper() == "DOWN":
-
-                            result = (
-                                "WIN"
-                                if close_price
-                                < entry_price
-                                else "LOSS"
-                            )
-
-                        else:
 
                             continue
 
-                        await set_signal_result(
+                        result = await settle_signal_by_price(
                             signal.id,
-                            result,
-                            close_price=close_price,
+                            close_price,
                         )
+
+                        if result is None:
+
+                            # Ничья или сигнал ещё нельзя закрыть.
+                            continue
 
                         logger.info(
                             "[RESULT] signal=%s pair=%s "
-                            "direction=%s entry=%s close=%s result=%s",
+                            "direction=%s entry=%s "
+                            "close=%s result=%s",
                             signal.id,
                             signal.pair,
                             signal.direction,
-                            entry_price,
+                            signal.entry_price,
                             close_price,
                             result,
                         )
@@ -1229,11 +1469,17 @@ async def on_shutdown():
 
     await close_database()
 
-    await bot.session.close()
+    try:
+
+        await bot.session.close()
+
+    except Exception:
+
+        pass
 
 
 # ============================================================
-# RUN BOT
+# BOT
 # ============================================================
 
 async def bot_runner():
@@ -1255,15 +1501,18 @@ async def bot_runner():
         result_worker.cancel()
 
         try:
+
             await result_worker
+
         except asyncio.CancelledError:
+
             pass
 
         await on_shutdown()
 
 
 # ============================================================
-# WEB SERVER
+# WEB
 # ============================================================
 
 async def web_runner():
