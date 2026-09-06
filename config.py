@@ -6,6 +6,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+
 load_dotenv()
 
 
@@ -13,7 +14,10 @@ load_dotenv()
 # ENV HELPERS
 # ============================================================
 
-def _env(name: str, default: str = "") -> str:
+def _env(
+    name: str,
+    default: str = "",
+) -> str:
     value = os.getenv(name)
 
     if value is None:
@@ -22,16 +26,23 @@ def _env(name: str, default: str = "") -> str:
     return value.strip()
 
 
-def _env_first(*names: str, default: str = "") -> str:
+def _env_first(
+    *names: str,
+    default: str = "",
+) -> str:
     for name in names:
         value = _env(name)
+
         if value:
             return value
 
     return default
 
 
-def _env_int(name: str, default: int = 0) -> int:
+def _env_int(
+    name: str,
+    default: int = 0,
+) -> int:
     value = _env(name)
 
     if not value:
@@ -43,7 +54,10 @@ def _env_int(name: str, default: int = 0) -> int:
         return default
 
 
-def _env_float(name: str, default: float = 0.0) -> float:
+def _env_float(
+    name: str,
+    default: float = 0.0,
+) -> float:
     value = _env(name)
 
     if not value:
@@ -55,7 +69,10 @@ def _env_float(name: str, default: float = 0.0) -> float:
         return default
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
+def _env_bool(
+    name: str,
+    default: bool = False,
+) -> bool:
     value = _env(name)
 
     if not value:
@@ -70,13 +87,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
     }
 
 
-def normalize_database_url(value: str) -> str:
+def normalize_database_url(
+    value: str,
+) -> str:
     value = value.strip()
 
     if not value:
         return ""
 
-    if value.startswith("postgresql+asyncpg://"):
+    if value.startswith(
+        "postgresql+asyncpg://"
+    ):
         return value
 
     prefixes = (
@@ -89,14 +110,17 @@ def normalize_database_url(value: str) -> str:
         if value.startswith(prefix):
             return (
                 "postgresql+asyncpg://"
-                + value.split("://", 1)[1]
+                + value.split(
+                    "://",
+                    1,
+                )[1]
             )
 
     return value
 
 
 # ============================================================
-# OTC PAIRS
+# OTC / FOREX PAIRS
 # ============================================================
 
 PAIRS = [
@@ -129,6 +153,7 @@ OTC_SYMBOLS = {
     for display_name, symbol in PAIRS
 }
 
+
 OTC_DISPLAY_NAMES = {
     symbol: display_name
     for display_name, symbol in PAIRS
@@ -154,15 +179,24 @@ TIMEFRAMES = [
 # TELEGRAM
 # ============================================================
 
-BOT_TOKEN = _env("BOT_TOKEN")
+BOT_TOKEN = _env(
+    "BOT_TOKEN"
+)
 
-OWNER_ID_RAW = _env("OWNER_ID")
+
+OWNER_ID_RAW = _env(
+    "OWNER_ID"
+)
 
 OWNER_ID: Optional[int] = None
 
 if OWNER_ID_RAW:
+
     try:
-        OWNER_ID = int(OWNER_ID_RAW)
+        OWNER_ID = int(
+            OWNER_ID_RAW
+        )
+
     except ValueError:
         OWNER_ID = None
 
@@ -185,6 +219,7 @@ JOIN_REQUIRED = _env_bool(
     False,
 )
 
+
 MIN_SIGNAL_SCORE = max(
     0.0,
     min(
@@ -195,6 +230,7 @@ MIN_SIGNAL_SCORE = max(
         ),
     ),
 )
+
 
 MIN_PROBABILITY = max(
     0.0,
@@ -207,6 +243,7 @@ MIN_PROBABILITY = max(
     ),
 )
 
+
 SCAN_INTERVAL = max(
     10,
     _env_int(
@@ -215,6 +252,7 @@ SCAN_INTERVAL = max(
     ),
 )
 
+
 TIMEZONE = _env(
     "TIMEZONE",
     "Europe/Moscow",
@@ -222,40 +260,103 @@ TIMEZONE = _env(
 
 
 # ============================================================
-# POCKET OPTION
+# EXTERNAL MARKET DATA
 # ============================================================
 
-# Основные имена.
+# Основной источник:
 #
-# Дополнительно поддерживаются:
-# POCKET_OPTION_EMAIL
-# POCKET_OPTION_PASSWORD
-# POCKET_OPTION_SSID
+#     biquote
+#
+# Резерв:
+#
+#     twelve_data
+#
+# Pocket Option login / password / SSID
+# больше не являются обязательными.
+
+MARKET_SOURCE = _env(
+    "MARKET_SOURCE",
+    "biquote",
+).lower()
+
+
+BIQUOTE_BASE_URL = _env(
+    "BIQUOTE_BASE_URL",
+    "https://biquote.io",
+).rstrip("/")
+
+
+TWELVE_DATA_API_KEY = _env_first(
+    "TWELVE_DATA_API_KEY",
+    "TWELVEDATA_API_KEY",
+)
+
+
+# Количество минутных свечей,
+# необходимых SignalEngine для анализа.
+#
+# Максимальный таймфрейм = 20 минут.
+# 60 свечей * 20 минут = 1200 минут.
+#
+# Берём запас.
+
+MARKET_CANDLE_LIMIT = max(
+    300,
+    _env_int(
+        "MARKET_CANDLE_LIMIT",
+        1600,
+    ),
+)
+
+
+MARKET_CACHE_SECONDS = max(
+    5,
+    _env_int(
+        "MARKET_CACHE_SECONDS",
+        20,
+    ),
+)
+
+
+# ============================================================
+# LEGACY POCKET OPTION SETTINGS
+# ============================================================
+#
+# Оставляем переменные для совместимости
+# со старыми файлами проекта.
+#
+# НОВЫЙ market.py их не использует.
+#
 
 PO_EMAIL = _env_first(
     "PO_EMAIL",
     "POCKET_OPTION_EMAIL",
 )
 
+
 PO_PASSWORD = _env_first(
     "PO_PASSWORD",
     "POCKET_OPTION_PASSWORD",
 )
+
 
 PO_SSID = _env_first(
     "PO_SSID",
     "POCKET_OPTION_SSID",
 )
 
+
 PO_AUTO_LOGIN = _env_bool(
     "PO_AUTO_LOGIN",
-    True,
+    False,
 )
+
 
 PO_DEMO = _env_bool(
     "PO_DEMO",
     True,
 )
+
 
 PO_LOGIN_URL = _env(
     "PO_LOGIN_URL",
@@ -275,6 +376,7 @@ otc_display_names = OTC_DISPLAY_NAMES
 
 bot_token = BOT_TOKEN
 owner_id = OWNER_ID
+
 database_url = DATABASE_URL
 
 join_required = JOIN_REQUIRED
@@ -285,12 +387,21 @@ min_probability = MIN_PROBABILITY
 scan_interval = SCAN_INTERVAL
 timezone = TIMEZONE
 
+market_source = MARKET_SOURCE
+biquote_base_url = BIQUOTE_BASE_URL
+twelve_data_api_key = TWELVE_DATA_API_KEY
+
+market_candle_limit = MARKET_CANDLE_LIMIT
+market_cache_seconds = MARKET_CACHE_SECONDS
+
 po_email = PO_EMAIL
 po_password = PO_PASSWORD
 po_ssid = PO_SSID
+
 po_auto_login = PO_AUTO_LOGIN
 po_demo = PO_DEMO
 po_login_url = PO_LOGIN_URL
+
 
 ANY_PAIR = "ANY"
 
@@ -304,6 +415,7 @@ class Config:
 
     BOT_TOKEN: str
     OWNER_ID: Optional[int]
+
     DATABASE_URL: str
 
     JOIN_REQUIRED: bool
@@ -314,6 +426,21 @@ class Config:
     SCAN_INTERVAL: int
     TIMEZONE: str
 
+    # ----------------------------------------
+    # External market
+    # ----------------------------------------
+
+    MARKET_SOURCE: str
+    BIQUOTE_BASE_URL: str
+    TWELVE_DATA_API_KEY: str
+
+    MARKET_CANDLE_LIMIT: int
+    MARKET_CACHE_SECONDS: int
+
+    # ----------------------------------------
+    # Legacy Pocket Option
+    # ----------------------------------------
+
     PO_EMAIL: str
     PO_PASSWORD: str
     PO_SSID: str
@@ -322,6 +449,10 @@ class Config:
     PO_DEMO: bool
     PO_LOGIN_URL: str
 
+    # ----------------------------------------
+    # Pairs / timeframes
+    # ----------------------------------------
+
     PAIRS: list
     TIMEFRAMES: list
 
@@ -329,6 +460,10 @@ class Config:
     OTC_DISPLAY_NAMES: dict
 
     ANY_PAIR: str
+
+    # ========================================================
+    # PROPERTIES
+    # ========================================================
 
     @property
     def bot_token(self):
@@ -361,6 +496,26 @@ class Config:
     @property
     def timezone(self):
         return self.TIMEZONE
+
+    @property
+    def market_source(self):
+        return self.MARKET_SOURCE
+
+    @property
+    def biquote_base_url(self):
+        return self.BIQUOTE_BASE_URL
+
+    @property
+    def twelve_data_api_key(self):
+        return self.TWELVE_DATA_API_KEY
+
+    @property
+    def market_candle_limit(self):
+        return self.MARKET_CANDLE_LIMIT
+
+    @property
+    def market_cache_seconds(self):
+        return self.MARKET_CACHE_SECONDS
 
     @property
     def po_email(self):
@@ -408,30 +563,51 @@ class Config:
 # ============================================================
 
 config = Config(
+
     BOT_TOKEN=BOT_TOKEN,
+
     OWNER_ID=OWNER_ID,
+
     DATABASE_URL=DATABASE_URL,
 
     JOIN_REQUIRED=JOIN_REQUIRED,
 
     MIN_SIGNAL_SCORE=MIN_SIGNAL_SCORE,
+
     MIN_PROBABILITY=MIN_PROBABILITY,
 
     SCAN_INTERVAL=SCAN_INTERVAL,
+
     TIMEZONE=TIMEZONE,
 
+    MARKET_SOURCE=MARKET_SOURCE,
+
+    BIQUOTE_BASE_URL=BIQUOTE_BASE_URL,
+
+    TWELVE_DATA_API_KEY=TWELVE_DATA_API_KEY,
+
+    MARKET_CANDLE_LIMIT=MARKET_CANDLE_LIMIT,
+
+    MARKET_CACHE_SECONDS=MARKET_CACHE_SECONDS,
+
     PO_EMAIL=PO_EMAIL,
+
     PO_PASSWORD=PO_PASSWORD,
+
     PO_SSID=PO_SSID,
 
     PO_AUTO_LOGIN=PO_AUTO_LOGIN,
+
     PO_DEMO=PO_DEMO,
+
     PO_LOGIN_URL=PO_LOGIN_URL,
 
     PAIRS=PAIRS,
+
     TIMEFRAMES=TIMEFRAMES,
 
     OTC_SYMBOLS=OTC_SYMBOLS,
+
     OTC_DISPLAY_NAMES=OTC_DISPLAY_NAMES,
 
     ANY_PAIR=ANY_PAIR,
@@ -443,23 +619,25 @@ config = Config(
 # ============================================================
 
 if not BOT_TOKEN:
+
     raise RuntimeError(
-        "BOT_TOKEN is not configured in Render."
+        "BOT_TOKEN is not configured "
+        "in Render Environment Variables."
     )
 
-if BOT_TOKEN == ":":
-    raise RuntimeError(
-        "BOT_TOKEN is invalid."
-    )
 
 if not DATABASE_URL:
+
     raise RuntimeError(
-        "DATABASE_URL is not configured."
+        "DATABASE_URL is not configured "
+        "in Render Environment Variables."
     )
+
 
 if not DATABASE_URL.startswith(
     "postgresql+asyncpg://"
 ):
+
     raise RuntimeError(
         "DATABASE_URL must be a PostgreSQL "
         "URL compatible with asyncpg."
@@ -467,14 +645,33 @@ if not DATABASE_URL.startswith(
 
 
 # ============================================================
-# POCKET OPTION VALIDATION
+# MARKET SOURCE VALIDATION
 # ============================================================
 
-if not PO_SSID and not (
-    PO_EMAIL and PO_PASSWORD
-):
+allowed_sources = {
+    "biquote",
+    "twelve_data",
+    "twelvedata",
+}
+
+
+if MARKET_SOURCE not in allowed_sources:
+
     raise RuntimeError(
-        "Pocket Option authentication is not configured. "
-        "Set PO_SSID or PO_EMAIL + PO_PASSWORD "
-        "in Render Environment Variables."
+        "MARKET_SOURCE must be one of: "
+        "biquote, twelve_data."
     )
+
+
+if MARKET_SOURCE in {
+    "twelve_data",
+    "twelvedata",
+}:
+
+    if not TWELVE_DATA_API_KEY:
+
+        raise RuntimeError(
+            "MARKET_SOURCE=twelve_data, "
+            "but TWELVE_DATA_API_KEY "
+            "is not configured."
+        )
