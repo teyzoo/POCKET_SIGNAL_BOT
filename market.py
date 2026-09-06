@@ -8,7 +8,6 @@ import os
 import queue
 import shutil
 import stat
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -19,20 +18,18 @@ logger = logging.getLogger("pocket_market")
 
 
 # ============================================================
-# CONFIG
+# TIMEOUTS
 # ============================================================
 
-CONNECT_TIMEOUT = 60
-AUTO_LOGIN_TIMEOUT = 120
-LOGIN_LIBRARY_TIMEOUT = 90
+CONNECT_TIMEOUT = 90
+AUTO_LOGIN_TIMEOUT = 180
+LOGIN_LIBRARY_TIMEOUT = 150
 
-BALANCE_TIMEOUT = 20
+BALANCE_TIMEOUT = 30
 CANDLE_REQUEST_TIMEOUT = 30
-CANDLES_HARD_TIMEOUT = 60
 CLIENT_CLOSE_TIMEOUT = 10
 
-PLAYWRIGHT_PREPARE_TIMEOUT = 120
-PLAYWRIGHT_TEST_TIMEOUT = 25
+PLAYWRIGHT_PREPARE_TIMEOUT = 60
 PLAYWRIGHT_INSTALL_TIMEOUT = 300
 
 WEBSOCKET_INIT_DELAY = 5
@@ -62,7 +59,7 @@ class Candle:
 
 
 # ============================================================
-# HELPERS
+# FILE HELPERS
 # ============================================================
 
 def _make_executable(path: str) -> None:
@@ -79,8 +76,14 @@ def _make_executable(path: str) -> None:
         pass
 
 
-def _find_browser_executable(root: str) -> str | None:
-    if not root or not os.path.exists(root):
+def _find_browser_executable(
+    root: str,
+) -> str | None:
+
+    if not root:
+        return None
+
+    if not os.path.exists(root):
         return None
 
     preferred_names = {
@@ -92,126 +95,343 @@ def _find_browser_executable(root: str) -> str | None:
 
     try:
         for current_root, dirs, files in os.walk(root):
+
             for filename in files:
+
                 if filename not in preferred_names:
                     continue
 
-                path = os.path.join(current_root, filename)
+                path = os.path.join(
+                    current_root,
+                    filename,
+                )
 
                 if os.path.isfile(path):
                     _make_executable(path)
                     return path
+
     except Exception as exc:
         logger.warning(
-            "[PLAYWRIGHT] Не удалось просканировать %s: %s",
-            root,
+            "[PLAYWRIGHT] Ошибка поиска browser: %s",
             exc,
         )
 
     return None
 
 
-def _copy_tree(src: str, dst: str) -> bool:
+def _copy_tree(
+    source: str,
+    destination: str,
+) -> bool:
+
     try:
-        if not os.path.exists(src):
+
+        if not os.path.exists(source):
             return False
 
-        os.makedirs(dst, exist_ok=True)
+        os.makedirs(
+            destination,
+            exist_ok=True,
+        )
 
-        for item in os.listdir(src):
-            source = os.path.join(src, item)
-            target = os.path.join(dst, item)
+        for item in os.listdir(source):
 
-            if os.path.isdir(source):
+            src = os.path.join(
+                source,
+                item,
+            )
+
+            dst = os.path.join(
+                destination,
+                item,
+            )
+
+            if os.path.isdir(src):
+
                 shutil.copytree(
-                    source,
-                    target,
+                    src,
+                    dst,
                     dirs_exist_ok=True,
                 )
+
             else:
-                shutil.copy2(source, target)
+
+                shutil.copy2(
+                    src,
+                    dst,
+                )
 
         return True
 
     except Exception as exc:
+
         logger.warning(
-            "[PLAYWRIGHT] Ошибка копирования %s -> %s: %s",
-            src,
-            dst,
+            "[PLAYWRIGHT] Ошибка копирования browser: %s",
             exc,
         )
+
         return False
 
 
 # ============================================================
-# PLAYWRIGHT TEST WORKER
+# PLAYWRIGHT ENVIRONMENT
 # ============================================================
 
-def _playwright_test_worker(result_queue: Any) -> None:
-    """
-    Отдельный процесс для проверки Chromium.
+def _get_playwright_sources() -> list[str]:
 
-    ВАЖНО:
-    Не запускаем sync_playwright внутри asyncio event loop.
-    Отдельный процесс полностью изолирует зависший Chromium.
-    """
+    sources: list[str] = []
+
+    env_paths = [
+        os.getenv(
+            "POCKET_PLAYWRIGHT_SOURCE_PATH"
+        ),
+        os.getenv(
+            "PLAYWRIGHT_BROWSERS_PATH"
+        ),
+    ]
+
+    for path in env_paths:
+
+        if path:
+            sources.append(path)
+
+    sources.extend(
+        [
+            "/opt/render/project/src/.cache/ms-playwright",
+            "/opt/render/.cache/ms-playwright",
+            "./.cache/ms-playwright",
+        ]
+    )
+
+    result: list[str] = []
+
+    for path in sources:
+
+        if not path:
+            continue
+
+        path = os.path.abspath(path)
+
+        if path not in result:
+            result.append(path)
+
+    return result
+
+
+async def _install_playwright() -> bool:
+
+    logger.info(
+        "[PLAYWRIGHT] Chromium не найден."
+    )
+
+    logger.info(
+        "[PLAYWRIGHT] Устанавливаю Chromium в %s",
+        RUNTIME_PLAYWRIGHT_PATH,
+    )
+
+    os.makedirs(
+        RUNTIME_PLAYWRIGHT_PATH,
+        exist_ok=True,
+    )
+
+    env = os.environ.copy()
+
+    env[
+        "PLAYWRIGHT_BROWSERS_PATH"
+    ] = RUNTIME_PLAYWRIGHT_PATH
+
+    command = [
+        sys.executable,
+        "-m",
+        "playwright",
+        "install",
+        "chromium",
+    ]
 
     try:
-        from playwright.sync_api import sync_playwright
 
-        logger.info(
-            "[PLAYWRIGHT TEST] Worker запущен."
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                timeout=15000,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-setuid-sandbox",
-                    "--no-zygote",
-                    "--disable-software-rasterizer",
-                    "--disable-blink-features=AutomationControlled",
-                ],
+        try:
+
+            output, _ = await asyncio.wait_for(
+                process.communicate(),
+                timeout=PLAYWRIGHT_INSTALL_TIMEOUT,
             )
 
-            page = browser.new_page()
+        except asyncio.TimeoutError:
 
-            page.goto(
-                "about:blank",
-                wait_until="domcontentloaded",
-                timeout=10000,
+            logger.error(
+                "[PLAYWRIGHT] Установка Chromium timeout."
             )
 
-            title = page.title()
+            try:
+                process.kill()
+            except Exception:
+                pass
 
-            page.close()
-            browser.close()
+            return False
 
-            result_queue.put(
-                {
-                    "ok": True,
-                    "title": title,
-                }
+        text = output.decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        logger.info(
+            "[PLAYWRIGHT] Install output:\n%s",
+            text[-12000:],
+        )
+
+        if process.returncode != 0:
+
+            logger.error(
+                "[PLAYWRIGHT] install завершился кодом %s",
+                process.returncode,
             )
+
+            return False
+
+        return True
 
     except Exception as exc:
-        try:
-            result_queue.put(
-                {
-                    "ok": False,
-                    "error": repr(exc),
-                }
+
+        logger.exception(
+            "[PLAYWRIGHT] Ошибка установки: %s",
+            exc,
+        )
+
+        return False
+
+
+async def prepare_playwright_environment() -> bool:
+
+    logger.info(
+        "[PLAYWRIGHT] Runtime path: %s",
+        RUNTIME_PLAYWRIGHT_PATH,
+    )
+
+    os.makedirs(
+        RUNTIME_PLAYWRIGHT_PATH,
+        exist_ok=True,
+    )
+
+    # --------------------------------------------------------
+    # 1. Runtime
+    # --------------------------------------------------------
+
+    executable = _find_browser_executable(
+        RUNTIME_PLAYWRIGHT_PATH
+    )
+
+    if executable:
+
+        logger.info(
+            "[PLAYWRIGHT] Найден Chromium в runtime: %s",
+            executable,
+        )
+
+        os.environ[
+            "PLAYWRIGHT_BROWSERS_PATH"
+        ] = RUNTIME_PLAYWRIGHT_PATH
+
+        # Не запускаем smoke-test.
+        # Именно он зависал на Render.
+        return True
+
+    # --------------------------------------------------------
+    # 2. Render cache
+    # --------------------------------------------------------
+
+    for source in _get_playwright_sources():
+
+        logger.info(
+            "[PLAYWRIGHT] Проверяю source: %s",
+            source,
+        )
+
+        executable = _find_browser_executable(
+            source
+        )
+
+        if not executable:
+            continue
+
+        logger.info(
+            "[PLAYWRIGHT] Найден Chromium в source: %s",
+            executable,
+        )
+
+        logger.info(
+            "[PLAYWRIGHT] Копирую browser в runtime..."
+        )
+
+        copied = await asyncio.to_thread(
+            _copy_tree,
+            source,
+            RUNTIME_PLAYWRIGHT_PATH,
+        )
+
+        if not copied:
+            continue
+
+        runtime_executable = _find_browser_executable(
+            RUNTIME_PLAYWRIGHT_PATH
+        )
+
+        if runtime_executable:
+
+            logger.info(
+                "[PLAYWRIGHT] Runtime Chromium: %s",
+                runtime_executable,
             )
-        except Exception:
-            pass
+
+            os.environ[
+                "PLAYWRIGHT_BROWSERS_PATH"
+            ] = RUNTIME_PLAYWRIGHT_PATH
+
+            return True
+
+    # --------------------------------------------------------
+    # 3. Install
+    # --------------------------------------------------------
+
+    installed = await _install_playwright()
+
+    if not installed:
+        return False
+
+    executable = _find_browser_executable(
+        RUNTIME_PLAYWRIGHT_PATH
+    )
+
+    if not executable:
+
+        logger.error(
+            "[PLAYWRIGHT] После установки Chromium "
+            "не найден."
+        )
+
+        return False
+
+    logger.info(
+        "[PLAYWRIGHT] Chromium установлен: %s",
+        executable,
+    )
+
+    os.environ[
+        "PLAYWRIGHT_BROWSERS_PATH"
+    ] = RUNTIME_PLAYWRIGHT_PATH
+
+    return True
 
 
 # ============================================================
-# POCKET OPTION LOGIN WORKER
+# LOGIN WORKER
 # ============================================================
 
 def _pocket_login_worker(
@@ -221,20 +441,31 @@ def _pocket_login_worker(
     demo: bool,
     headless: bool,
     timeout: int,
+    browsers_path: str,
 ) -> None:
-    """
-    Pocket Option login в отдельном процессе.
-
-    Это важно для Render:
-    если библиотека Playwright зависнет,
-    основной Telegram-процесс не заблокируется навсегда.
-    """
 
     try:
-        from BinaryOptionsToolsV2.pocketoption.tools.login import login
+
+        os.environ[
+            "PLAYWRIGHT_BROWSERS_PATH"
+        ] = browsers_path
+
+        # Render environment
+        os.environ[
+            "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"
+        ] = "1"
 
         logger.info(
-            "[AUTO LOGIN WORKER] Запуск login()."
+            "[AUTO LOGIN WORKER] PLAYWRIGHT_BROWSERS_PATH=%s",
+            browsers_path,
+        )
+
+        from BinaryOptionsToolsV2.pocketoption.tools.login import (
+            login,
+        )
+
+        logger.info(
+            "[AUTO LOGIN WORKER] Запускаю login()."
         )
 
         ssid = login(
@@ -247,12 +478,14 @@ def _pocket_login_worker(
         )
 
         if not ssid:
+
             result_queue.put(
                 {
                     "ok": False,
                     "error": "login() вернул пустой SSID",
                 }
             )
+
             return
 
         result_queue.put(
@@ -263,29 +496,37 @@ def _pocket_login_worker(
         )
 
     except Exception as exc:
+
+        logger.exception(
+            "[AUTO LOGIN WORKER] Login exception."
+        )
+
         try:
+
             result_queue.put(
                 {
                     "ok": False,
                     "error": repr(exc),
                 }
             )
+
         except Exception:
             pass
 
 
 # ============================================================
-# MARKET CLIENT
+# MARKET
 # ============================================================
 
 class PocketMarket:
 
     def __init__(self) -> None:
+
         self.client: Any | None = None
         self.ssid: str | None = None
 
-        self.connected: bool = False
-        self.demo: bool = True
+        self.connected = False
+        self.demo = True
 
         self.email: str | None = None
         self.password: str | None = None
@@ -298,427 +539,8 @@ class PocketMarket:
         )
 
     # ========================================================
-    # PLAYWRIGHT
+    # AUTO LOGIN
     # ========================================================
-
-    def _get_playwright_sources(self) -> list[str]:
-        sources: list[str] = []
-
-        env_sources = [
-            os.getenv("POCKET_PLAYWRIGHT_SOURCE_PATH"),
-            os.getenv("PLAYWRIGHT_BROWSERS_PATH"),
-        ]
-
-        for path in env_sources:
-            if path:
-                sources.append(path)
-
-        sources.extend(
-            [
-                "/opt/render/project/src/.cache/ms-playwright",
-                "/opt/render/.cache/ms-playwright",
-                "./.cache/ms-playwright",
-            ]
-        )
-
-        result: list[str] = []
-
-        for path in sources:
-            if not path:
-                continue
-
-            path = os.path.abspath(path)
-
-            if path not in result:
-                result.append(path)
-
-        return result
-
-    def _launch_test_browser(self) -> bool:
-        """
-        Проверяет Chromium в отдельном процессе.
-
-        Используется time.monotonic(), а не
-        asyncio.get_event_loop(), потому что метод может
-        выполняться внутри asyncio.to_thread().
-        """
-
-        ctx = mp.get_context("spawn")
-        result_queue = ctx.Queue()
-
-        process = ctx.Process(
-            target=_playwright_test_worker,
-            args=(result_queue,),
-        )
-
-        logger.info(
-            "[PLAYWRIGHT] Проверяю запуск Chromium..."
-        )
-
-        started = time.monotonic()
-
-        try:
-            process.start()
-
-            while time.monotonic() - started < PLAYWRIGHT_TEST_TIMEOUT:
-                try:
-                    result = result_queue.get(
-                        timeout=0.5
-                    )
-
-                    if result.get("ok"):
-                        logger.info(
-                            "[PLAYWRIGHT] Chromium успешно запускается."
-                        )
-                        return True
-
-                    logger.error(
-                        "[PLAYWRIGHT TEST] ERROR: %s",
-                        result.get("error"),
-                    )
-                    return False
-
-                except queue.Empty:
-                    if not process.is_alive():
-                        break
-
-            logger.error(
-                "[PLAYWRIGHT] Chromium не ответил за %s секунд.",
-                PLAYWRIGHT_TEST_TIMEOUT,
-            )
-
-            return False
-
-        except Exception as exc:
-            logger.error(
-                "[PLAYWRIGHT] Ошибка запуска test worker: %s",
-                exc,
-            )
-            return False
-
-        finally:
-            if process.is_alive():
-                try:
-                    process.terminate()
-                except Exception:
-                    pass
-
-            try:
-                process.join(timeout=5)
-            except Exception:
-                pass
-
-            if process.is_alive():
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-
-    async def _install_chromium(self) -> bool:
-        logger.info(
-            "[PLAYWRIGHT] Chromium не найден. Устанавливаю..."
-        )
-
-        env = os.environ.copy()
-        env["PLAYWRIGHT_BROWSERS_PATH"] = (
-            RUNTIME_PLAYWRIGHT_PATH
-        )
-
-        os.makedirs(
-            RUNTIME_PLAYWRIGHT_PATH,
-            exist_ok=True,
-        )
-
-        command = [
-            sys.executable,
-            "-m",
-            "playwright",
-            "install",
-            "chromium",
-        ]
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-
-            try:
-                stdout, _ = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=PLAYWRIGHT_INSTALL_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "[PLAYWRIGHT] Установка Chromium превысила timeout."
-                )
-
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-
-                return False
-
-            output = stdout.decode(
-                "utf-8",
-                errors="replace",
-            )
-
-            logger.info(
-                "[PLAYWRIGHT] Install output:\n%s",
-                output[-10000:],
-            )
-
-            if process.returncode != 0:
-                logger.error(
-                    "[PLAYWRIGHT] playwright install завершился с кодом %s",
-                    process.returncode,
-                )
-                return False
-
-            return True
-
-        except Exception as exc:
-            logger.error(
-                "[PLAYWRIGHT] Ошибка установки Chromium: %s",
-                exc,
-            )
-            return False
-
-    async def _prepare_playwright_environment(self) -> bool:
-        logger.info(
-            "[PLAYWRIGHT] Runtime path: %s",
-            RUNTIME_PLAYWRIGHT_PATH,
-        )
-
-        os.makedirs(
-            RUNTIME_PLAYWRIGHT_PATH,
-            exist_ok=True,
-        )
-
-        # ----------------------------------------------------
-        # 1. Уже есть browser в runtime
-        # ----------------------------------------------------
-
-        executable = _find_browser_executable(
-            RUNTIME_PLAYWRIGHT_PATH
-        )
-
-        if executable:
-            logger.info(
-                "[PLAYWRIGHT] Найден Chromium в runtime: %s",
-                executable,
-            )
-
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = (
-                RUNTIME_PLAYWRIGHT_PATH
-            )
-
-            test_ok = await asyncio.to_thread(
-                self._launch_test_browser
-            )
-
-            if test_ok:
-                return True
-
-            logger.warning(
-                "[PLAYWRIGHT] Chromium в runtime найден, "
-                "но тест запуска не прошёл."
-            )
-
-        # ----------------------------------------------------
-        # 2. Ищем browser в Render cache
-        # ----------------------------------------------------
-
-        for source in self._get_playwright_sources():
-            logger.info(
-                "[PLAYWRIGHT] Source path: %s",
-                source,
-            )
-
-            executable = _find_browser_executable(
-                source
-            )
-
-            if not executable:
-                continue
-
-            logger.info(
-                "[PLAYWRIGHT] Найден Chromium в source: %s",
-                executable,
-            )
-
-            logger.info(
-                "[PLAYWRIGHT] Копирую Playwright browser в runtime..."
-            )
-
-            copied = await asyncio.to_thread(
-                _copy_tree,
-                source,
-                RUNTIME_PLAYWRIGHT_PATH,
-            )
-
-            if not copied:
-                continue
-
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = (
-                RUNTIME_PLAYWRIGHT_PATH
-            )
-
-            executable = _find_browser_executable(
-                RUNTIME_PLAYWRIGHT_PATH
-            )
-
-            if executable:
-                logger.info(
-                    "[PLAYWRIGHT] Runtime browser: %s",
-                    executable,
-                )
-
-            test_ok = await asyncio.to_thread(
-                self._launch_test_browser
-            )
-
-            if test_ok:
-                return True
-
-        # ----------------------------------------------------
-        # 3. Устанавливаем Chromium
-        # ----------------------------------------------------
-
-        installed = await self._install_chromium()
-
-        if not installed:
-            logger.error(
-                "[PLAYWRIGHT] Не удалось установить Chromium."
-            )
-            return False
-
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = (
-            RUNTIME_PLAYWRIGHT_PATH
-        )
-
-        executable = _find_browser_executable(
-            RUNTIME_PLAYWRIGHT_PATH
-        )
-
-        if executable:
-            logger.info(
-                "[PLAYWRIGHT] Chromium после установки: %s",
-                executable,
-            )
-
-        test_ok = await asyncio.to_thread(
-            self._launch_test_browser
-        )
-
-        if not test_ok:
-            logger.error(
-                "[PLAYWRIGHT] Chromium установлен, "
-                "но не проходит smoke test."
-            )
-            return False
-
-        return True
-
-    # ========================================================
-    # LOGIN
-    # ========================================================
-
-    async def _run_login_process(
-        self,
-        email: str,
-        password: str,
-        demo: bool,
-        headless: bool,
-    ) -> str | None:
-
-        ctx = mp.get_context("spawn")
-        result_queue = ctx.Queue()
-
-        process = ctx.Process(
-            target=_pocket_login_worker,
-            args=(
-                result_queue,
-                email,
-                password,
-                demo,
-                headless,
-                LOGIN_LIBRARY_TIMEOUT,
-            ),
-        )
-
-        logger.info(
-            "[AUTO LOGIN] Запускаю login worker."
-        )
-
-        started = time.monotonic()
-
-        try:
-            process.start()
-
-            while (
-                time.monotonic() - started
-                < AUTO_LOGIN_TIMEOUT
-            ):
-                try:
-                    result = result_queue.get(
-                        timeout=1
-                    )
-
-                    if result.get("ok"):
-                        ssid = result.get("ssid")
-
-                        logger.info(
-                            "[AUTO LOGIN] SSID успешно получен."
-                        )
-
-                        return str(ssid)
-
-                    logger.error(
-                        "[AUTO LOGIN] Login error: %s",
-                        result.get("error"),
-                    )
-
-                    return None
-
-                except queue.Empty:
-                    if not process.is_alive():
-                        break
-
-            logger.error(
-                "[AUTO LOGIN] Login worker timeout."
-            )
-
-            return None
-
-        except Exception as exc:
-            logger.error(
-                "[AUTO LOGIN] Ошибка запуска login worker: %s",
-                exc,
-            )
-            return None
-
-        finally:
-            if process.is_alive():
-                try:
-                    process.terminate()
-                except Exception:
-                    pass
-
-            try:
-                process.join(timeout=5)
-            except Exception:
-                pass
-
-            if process.is_alive():
-                try:
-                    process.kill()
-                except Exception:
-                    pass
 
     async def auto_login(
         self,
@@ -732,30 +554,154 @@ class PocketMarket:
             "[AUTO LOGIN] Подготавливаю Playwright..."
         )
 
-        prepared = await asyncio.wait_for(
-            self._prepare_playwright_environment(),
-            timeout=PLAYWRIGHT_PREPARE_TIMEOUT,
-        )
+        try:
+
+            prepared = await asyncio.wait_for(
+                prepare_playwright_environment(),
+                timeout=PLAYWRIGHT_PREPARE_TIMEOUT,
+            )
+
+        except asyncio.TimeoutError:
+
+            logger.error(
+                "[AUTO LOGIN] Playwright preparation timeout."
+            )
+
+            return None
 
         if not prepared:
+
             logger.error(
-                "[AUTO LOGIN] Playwright environment не готов."
+                "[AUTO LOGIN] Playwright environment "
+                "не готов."
             )
+
             return None
+
+        browsers_path = os.environ.get(
+            "PLAYWRIGHT_BROWSERS_PATH",
+            RUNTIME_PLAYWRIGHT_PATH,
+        )
 
         logger.info(
             "[AUTO LOGIN] Playwright готов."
         )
 
-        return await self._run_login_process(
-            email=email,
-            password=password,
-            demo=demo,
-            headless=headless,
+        logger.info(
+            "[AUTO LOGIN] Browser path: %s",
+            browsers_path,
         )
 
+        # ----------------------------------------------------
+        # Separate process
+        # ----------------------------------------------------
+
+        ctx = mp.get_context(
+            "spawn"
+        )
+
+        result_queue = ctx.Queue()
+
+        process = ctx.Process(
+            target=_pocket_login_worker,
+            args=(
+                result_queue,
+                email,
+                password,
+                demo,
+                headless,
+                LOGIN_LIBRARY_TIMEOUT,
+                browsers_path,
+            ),
+        )
+
+        logger.info(
+            "[AUTO LOGIN] Запускаю login worker."
+        )
+
+        started = time.monotonic()
+
+        try:
+
+            process.start()
+
+            while (
+                time.monotonic() - started
+                < AUTO_LOGIN_TIMEOUT
+            ):
+
+                try:
+
+                    result = result_queue.get(
+                        timeout=1
+                    )
+
+                    if result.get("ok"):
+
+                        ssid = result.get(
+                            "ssid"
+                        )
+
+                        logger.info(
+                            "[AUTO LOGIN] SSID успешно получен."
+                        )
+
+                        return str(ssid)
+
+                    logger.error(
+                        "[AUTO LOGIN] Login error: %s",
+                        result.get(
+                            "error"
+                        ),
+                    )
+
+                    return None
+
+                except queue.Empty:
+
+                    if not process.is_alive():
+                        break
+
+            logger.error(
+                "[AUTO LOGIN] Login worker timeout."
+            )
+
+            return None
+
+        except Exception as exc:
+
+            logger.exception(
+                "[AUTO LOGIN] Ошибка login worker: %s",
+                exc,
+            )
+
+            return None
+
+        finally:
+
+            if process.is_alive():
+
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+
+            try:
+                process.join(
+                    timeout=5
+                )
+            except Exception:
+                pass
+
+            if process.is_alive():
+
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
     # ========================================================
-    # CLIENT
+    # CREATE CLIENT
     # ========================================================
 
     async def _create_client(
@@ -764,6 +710,7 @@ class PocketMarket:
     ) -> Any | None:
 
         try:
+
             from BinaryOptionsToolsV2.pocketoption import (
                 PocketOptionAsync,
             )
@@ -772,7 +719,9 @@ class PocketMarket:
                 "[MARKET] Создаю PocketOptionAsync..."
             )
 
-            client = PocketOptionAsync(ssid)
+            client = PocketOptionAsync(
+                ssid
+            )
 
             await asyncio.sleep(
                 WEBSOCKET_INIT_DELAY
@@ -785,10 +734,12 @@ class PocketMarket:
             return client
 
         except Exception as exc:
+
             logger.exception(
                 "[MARKET] Ошибка создания клиента: %s",
                 exc,
             )
+
             return None
 
     # ========================================================
@@ -806,31 +757,39 @@ class PocketMarket:
 
         async with self._connect_lock:
 
-            if self.connected and self.client is not None:
+            if (
+                self.connected
+                and self.client is not None
+            ):
+
                 logger.info(
                     "[MARKET] Уже подключён."
                 )
+
                 return True
 
             self.demo = demo
 
             # ------------------------------------------------
-            # SSID из аргумента
+            # SSID argument
             # ------------------------------------------------
 
             if ssid:
-                self.ssid = ssid
+
+                self.ssid = ssid.strip()
 
             # ------------------------------------------------
-            # SSID из ENV
+            # SSID ENV
             # ------------------------------------------------
 
             if not self.ssid:
+
                 env_ssid = os.getenv(
                     "PO_SSID"
                 )
 
                 if env_ssid:
+
                     self.ssid = env_ssid.strip()
 
                     logger.info(
@@ -843,19 +802,23 @@ class PocketMarket:
 
             if not self.ssid:
 
-                email = email or os.getenv(
-                    "PO_EMAIL"
+                email = (
+                    email
+                    or os.getenv("PO_EMAIL")
                 )
 
-                password = password or os.getenv(
-                    "PO_PASSWORD"
+                password = (
+                    password
+                    or os.getenv("PO_PASSWORD")
                 )
 
                 if not email or not password:
+
                     logger.error(
                         "[MARKET] Нет PO_SSID "
                         "и нет PO_EMAIL/PO_PASSWORD."
                     )
+
                     return False
 
                 logger.info(
@@ -863,28 +826,46 @@ class PocketMarket:
                     "Запускаю автоматический login."
                 )
 
-                generated_ssid = await asyncio.wait_for(
-                    self.auto_login(
-                        email=email,
-                        password=password,
-                        demo=demo,
-                        headless=headless,
-                    ),
-                    timeout=AUTO_LOGIN_TIMEOUT
-                    + PLAYWRIGHT_PREPARE_TIMEOUT
-                    + 30,
-                )
+                try:
+
+                    generated_ssid = (
+                        await asyncio.wait_for(
+                            self.auto_login(
+                                email=email,
+                                password=password,
+                                demo=demo,
+                                headless=headless,
+                            ),
+                            timeout=(
+                                AUTO_LOGIN_TIMEOUT
+                                + PLAYWRIGHT_PREPARE_TIMEOUT
+                                + 30
+                            ),
+                        )
+                    )
+
+                except asyncio.TimeoutError:
+
+                    logger.error(
+                        "[MARKET] Общий timeout "
+                        "авторизации."
+                    )
+
+                    return False
 
                 if not generated_ssid:
+
                     logger.error(
-                        "[MARKET] Auto login не получил SSID."
+                        "[MARKET] Auto login "
+                        "не получил SSID."
                     )
+
                     return False
 
                 self.ssid = generated_ssid
 
             # ------------------------------------------------
-            # CREATE CLIENT
+            # CLIENT
             # ------------------------------------------------
 
             logger.info(
@@ -892,18 +873,30 @@ class PocketMarket:
                 "Создаю Pocket Option client."
             )
 
-            self.client = await asyncio.wait_for(
-                self._create_client(
-                    self.ssid
-                ),
-                timeout=CONNECT_TIMEOUT,
-            )
+            try:
+
+                self.client = await asyncio.wait_for(
+                    self._create_client(
+                        self.ssid
+                    ),
+                    timeout=CONNECT_TIMEOUT,
+                )
+
+            except asyncio.TimeoutError:
+
+                logger.error(
+                    "[MARKET] Client creation timeout."
+                )
+
+                self.client = None
+
+                return False
 
             if self.client is None:
                 return False
 
             # ------------------------------------------------
-            # BALANCE TEST
+            # BALANCE
             # ------------------------------------------------
 
             logger.info(
@@ -912,6 +905,7 @@ class PocketMarket:
             )
 
             try:
+
                 balance_method = getattr(
                     self.client,
                     "balance",
@@ -919,14 +913,19 @@ class PocketMarket:
                 )
 
                 if balance_method is None:
+
                     logger.warning(
-                        "[MARKET] У клиента нет balance(). "
-                        "Продолжаю без balance check."
+                        "[MARKET] balance() отсутствует."
                     )
+
                 else:
+
                     result = balance_method()
 
-                    if inspect.isawaitable(result):
+                    if inspect.isawaitable(
+                        result
+                    ):
+
                         result = await asyncio.wait_for(
                             result,
                             timeout=BALANCE_TIMEOUT,
@@ -937,7 +936,18 @@ class PocketMarket:
                         result,
                     )
 
+            except asyncio.TimeoutError:
+
+                logger.error(
+                    "[MARKET] Balance timeout."
+                )
+
+                await self.close()
+
+                return False
+
             except Exception as exc:
+
                 logger.error(
                     "[MARKET] Balance check failed: %s",
                     exc,
@@ -973,37 +983,28 @@ class PocketMarket:
         **kwargs: Any,
     ) -> list[Candle]:
 
-        """
-        Совместимый метод для main.py / scheduler.
+        if "period" in kwargs:
 
-        Поддерживает:
-
-            candles(
-                pair,
-                minutes=1,
-                limit=300
+            period = int(
+                kwargs["period"]
             )
 
-        Также понимает старый формат:
-
-            period=60
-            count=300
-            offset=...
-        """
-
-        if "period" in kwargs:
-            period = int(kwargs["period"])
         else:
+
             period = int(minutes) * 60
 
         if "count" in kwargs:
-            count = int(kwargs["count"])
+
+            count = int(
+                kwargs["count"]
+            )
+
         else:
+
             count = int(limit)
 
         offset = kwargs.get(
-            "offset",
-            None,
+            "offset"
         )
 
         return await self.get_candle_data(
@@ -1036,10 +1037,15 @@ class PocketMarket:
         offset: int | None = None,
     ) -> list[Candle]:
 
-        if self.client is None or not self.connected:
+        if (
+            self.client is None
+            or not self.connected
+        ):
+
             logger.warning(
                 "[MARKET] Candle request while disconnected."
             )
+
             return []
 
         if not asset:
@@ -1055,16 +1061,16 @@ class PocketMarket:
             int(count),
         )
 
-        # ----------------------------------------------------
-        # Рассчитываем offset
-        # ----------------------------------------------------
-
         if offset is None:
-            offset = period * count
+
+            offset = (
+                period * count
+            )
 
         async with self._candles_lock:
 
             try:
+
                 logger.info(
                     "[CANDLES] Запрашиваю %s: "
                     "period=%s count=%s offset=%s",
@@ -1081,38 +1087,43 @@ class PocketMarket:
                 )
 
                 if method is None:
+
                     logger.error(
-                        "[CANDLES] У клиента нет get_candles()."
+                        "[CANDLES] У клиента "
+                        "нет get_candles()."
                     )
+
                     return []
 
-                # ------------------------------------------------
-                # BinaryOptionsToolsV2:
-                #
-                # get_candles(asset, period, offset)
-                # ------------------------------------------------
-
                 try:
+
                     result = method(
                         asset,
                         period,
                         offset,
                     )
+
                 except TypeError:
 
                     try:
+
                         result = method(
                             asset=asset,
                             period=period,
                             offset=offset,
                         )
+
                     except TypeError:
+
                         result = method(
                             asset,
                             period,
                         )
 
-                if inspect.isawaitable(result):
+                if inspect.isawaitable(
+                    result
+                ):
+
                     result = await asyncio.wait_for(
                         result,
                         timeout=CANDLE_REQUEST_TIMEOUT,
@@ -1123,24 +1134,24 @@ class PocketMarket:
                 )
 
                 if not candles:
+
                     logger.warning(
                         "[CANDLES] %s: пустой результат.",
                         asset,
                     )
+
                     return []
 
                 candles.sort(
                     key=lambda x: x.timestamp
                 )
 
-                # ------------------------------------------------
-                # Удаляем дубликаты
-                # ------------------------------------------------
-
                 unique: dict[int, Candle] = {}
 
                 for candle in candles:
-                    unique[candle.timestamp] = candle
+                    unique[
+                        candle.timestamp
+                    ] = candle
 
                 candles = list(
                     unique.values()
@@ -1149,10 +1160,6 @@ class PocketMarket:
                 candles.sort(
                     key=lambda x: x.timestamp
                 )
-
-                # ------------------------------------------------
-                # Не отдаём формирующуюся свечу
-                # ------------------------------------------------
 
                 now = int(
                     datetime.now(
@@ -1167,15 +1174,15 @@ class PocketMarket:
                 candles = [
                     candle
                     for candle in candles
-                    if candle.timestamp < current_bucket
+                    if candle.timestamp
+                    < current_bucket
                 ]
 
-                # ------------------------------------------------
-                # Последние count
-                # ------------------------------------------------
-
                 if len(candles) > count:
-                    candles = candles[-count:]
+
+                    candles = candles[
+                        -count:
+                    ]
 
                 logger.info(
                     "[CANDLES] %s: получено %s свечей.",
@@ -1186,18 +1193,22 @@ class PocketMarket:
                 return candles
 
             except asyncio.TimeoutError:
+
                 logger.error(
                     "[CANDLES] Timeout %s.",
                     asset,
                 )
+
                 return []
 
             except Exception as exc:
+
                 logger.exception(
                     "[CANDLES] Ошибка получения %s: %s",
                     asset,
                     exc,
                 )
+
                 return []
 
     # ========================================================
@@ -1212,13 +1223,6 @@ class PocketMarket:
         if raw is None:
             return []
 
-        # ----------------------------------------------------
-        # Некоторые версии API возвращают:
-        #
-        # {"data": [...]}
-        # {"candles": [...]}
-        # ----------------------------------------------------
-
         if isinstance(raw, dict):
 
             for key in (
@@ -1227,26 +1231,32 @@ class PocketMarket:
                 "result",
                 "history",
             ):
+
                 if key in raw:
+
                     raw = raw[key]
+
                     break
 
-        # ----------------------------------------------------
-        # DataFrame
-        # ----------------------------------------------------
-
-        if hasattr(raw, "to_dict") and hasattr(
-            raw,
-            "columns",
+        if (
+            hasattr(raw, "to_dict")
+            and hasattr(raw, "columns")
         ):
+
             try:
+
                 raw = raw.to_dict(
                     orient="records"
                 )
+
             except Exception:
                 pass
 
-        if not isinstance(raw, (list, tuple)):
+        if not isinstance(
+            raw,
+            (list, tuple),
+        ):
+
             return []
 
         result: list[Candle] = []
@@ -1255,81 +1265,136 @@ class PocketMarket:
 
             try:
 
-                # ------------------------------------------------
-                # dict
-                # ------------------------------------------------
-
-                if isinstance(item, dict):
+                if isinstance(
+                    item,
+                    dict,
+                ):
 
                     timestamp = (
                         item.get("timestamp")
                         or item.get("time")
                         or item.get("from")
                         or item.get("at")
-                        or item.get("created_at")
                     )
 
                     open_price = (
                         item.get("open")
-                        or item.get("o")
+                        if item.get("open")
+                        is not None
+                        else item.get("o")
                     )
 
                     high_price = (
                         item.get("high")
-                        or item.get("h")
+                        if item.get("high")
+                        is not None
+                        else item.get("h")
                     )
 
                     low_price = (
                         item.get("low")
-                        or item.get("l")
+                        if item.get("low")
+                        is not None
+                        else item.get("l")
                     )
 
                     close_price = (
                         item.get("close")
-                        or item.get("c")
+                        if item.get("close")
+                        is not None
+                        else item.get("c")
                     )
 
                     volume = (
                         item.get("volume")
-                        or item.get("v")
-                        or 0
+                        if item.get("volume")
+                        is not None
+                        else item.get("v", 0)
                     )
-
-                # ------------------------------------------------
-                # object
-                # ------------------------------------------------
 
                 else:
 
                     timestamp = (
-                        getattr(item, "timestamp", None)
-                        or getattr(item, "time", None)
-                        or getattr(item, "from", None)
+                        getattr(
+                            item,
+                            "timestamp",
+                            None,
+                        )
+                        or getattr(
+                            item,
+                            "time",
+                            None,
+                        )
+                        or getattr(
+                            item,
+                            "from",
+                            None,
+                        )
                     )
 
                     open_price = (
-                        getattr(item, "open", None)
-                        or getattr(item, "o", None)
+                        getattr(
+                            item,
+                            "open",
+                            None,
+                        )
+                        or getattr(
+                            item,
+                            "o",
+                            None,
+                        )
                     )
 
                     high_price = (
-                        getattr(item, "high", None)
-                        or getattr(item, "h", None)
+                        getattr(
+                            item,
+                            "high",
+                            None,
+                        )
+                        or getattr(
+                            item,
+                            "h",
+                            None,
+                        )
                     )
 
                     low_price = (
-                        getattr(item, "low", None)
-                        or getattr(item, "l", None)
+                        getattr(
+                            item,
+                            "low",
+                            None,
+                        )
+                        or getattr(
+                            item,
+                            "l",
+                            None,
+                        )
                     )
 
                     close_price = (
-                        getattr(item, "close", None)
-                        or getattr(item, "c", None)
+                        getattr(
+                            item,
+                            "close",
+                            None,
+                        )
+                        or getattr(
+                            item,
+                            "c",
+                            None,
+                        )
                     )
 
                     volume = (
-                        getattr(item, "volume", None)
-                        or getattr(item, "v", None)
+                        getattr(
+                            item,
+                            "volume",
+                            None,
+                        )
+                        or getattr(
+                            item,
+                            "v",
+                            None,
+                        )
                         or 0
                     )
 
@@ -1348,20 +1413,33 @@ class PocketMarket:
                 if close_price is None:
                     continue
 
-                timestamp = float(timestamp)
+                timestamp = float(
+                    timestamp
+                )
 
-                # milliseconds -> seconds
                 if timestamp > 10_000_000_000:
                     timestamp /= 1000
 
                 result.append(
                     Candle(
-                        timestamp=int(timestamp),
-                        open=float(open_price),
-                        high=float(high_price),
-                        low=float(low_price),
-                        close=float(close_price),
-                        volume=float(volume or 0),
+                        timestamp=int(
+                            timestamp
+                        ),
+                        open=float(
+                            open_price
+                        ),
+                        high=float(
+                            high_price
+                        ),
+                        low=float(
+                            low_price
+                        ),
+                        close=float(
+                            close_price
+                        ),
+                        volume=float(
+                            volume or 0
+                        ),
                     )
                 )
 
@@ -1401,17 +1479,20 @@ class PocketMarket:
             return False
 
         if age > max_delay:
+
             logger.warning(
-                "[CANDLES] Данные устарели: age=%ss max=%ss",
+                "[CANDLES] Данные устарели: "
+                "age=%ss max=%ss",
                 age,
                 max_delay,
             )
+
             return False
 
         return True
 
     # ========================================================
-    # MARKET TEST
+    # TEST
     # ========================================================
 
     async def test_market(
@@ -1459,6 +1540,7 @@ class PocketMarket:
             )
 
             if close_method is None:
+
                 close_method = getattr(
                     client,
                     "disconnect",
@@ -1466,14 +1548,20 @@ class PocketMarket:
                 )
 
             if close_method is None:
+
                 logger.info(
-                    "[MARKET] У клиента нет close/disconnect."
+                    "[MARKET] У клиента "
+                    "нет close/disconnect."
                 )
+
                 return
 
             result = close_method()
 
-            if inspect.isawaitable(result):
+            if inspect.isawaitable(
+                result
+            ):
+
                 await asyncio.wait_for(
                     result,
                     timeout=CLIENT_CLOSE_TIMEOUT,
@@ -1484,11 +1572,13 @@ class PocketMarket:
             )
 
         except asyncio.TimeoutError:
+
             logger.warning(
                 "[MARKET] Client close timeout."
             )
 
         except Exception as exc:
+
             logger.warning(
                 "[MARKET] Ошибка закрытия client: %s",
                 exc,
@@ -1499,7 +1589,7 @@ class PocketMarket:
 
 
 # ============================================================
-# GLOBAL MARKET INSTANCE
+# GLOBAL INSTANCE
 # ============================================================
 
 market = PocketMarket()
