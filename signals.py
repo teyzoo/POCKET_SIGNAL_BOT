@@ -15,61 +15,41 @@ class SignalResult:
     timeframe: int
     direction: str
 
-    # Техническая уверенность, НЕ WINRATE.
+    # Техническая уверенность.
+    # НЕ WINRATE.
     probability: float
 
-    # Техническое качество сигнала.
     quality: float
 
-    # Точное плановое время входа.
     entry_time: datetime
-
-    # Плановое время окончания экспирации.
     close_time: datetime
 
-    # Цена последней полностью закрытой M1-свечи.
     entry_price: float | None
 
     reasons: list[str]
 
 
-# ============================================================
-# DATETIME
-# ============================================================
-
-def _utc_datetime(value: datetime) -> datetime:
-    """
-    Приводит datetime к UTC.
-
-    ВАЖНО:
-    market.py уже нормализует timestamps внешнего
-    источника в UTC. Поэтому naive datetime здесь
-    трактуется как UTC.
-    """
+def _utc_datetime(
+    value: datetime,
+) -> datetime:
 
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
+        return value.replace(
+            tzinfo=timezone.utc
+        )
 
-    return value.astimezone(timezone.utc)
+    return value.astimezone(
+        timezone.utc
+    )
 
 
-def _next_minute(moment: datetime | None = None) -> datetime:
-    """
-    Возвращает ближайшую следующую полную минуту.
-
-    Например:
-
-    20:55:03 -> 20:56:00
-    20:55:59 -> 20:56:00
-    20:56:00 -> 20:57:00
-
-    Это используется как фактическое плановое
-    время входа, чтобы сигнал никогда не назначался
-    в прошлом.
-    """
+def _next_minute(
+    moment: datetime | None = None,
+) -> datetime:
 
     now = _utc_datetime(
-        moment or datetime.now(timezone.utc)
+        moment
+        or datetime.now(timezone.utc)
     )
 
     return (
@@ -81,10 +61,6 @@ def _next_minute(moment: datetime | None = None) -> datetime:
     )
 
 
-# ============================================================
-# LAST CLOSED M1
-# ============================================================
-
 def _last_closed_m1(
     candles: list[Candle],
     moment: datetime | None = None,
@@ -93,40 +69,36 @@ def _last_closed_m1(
     if not candles:
         return None
 
-    moment = _utc_datetime(
-        moment or datetime.now(timezone.utc)
+    now = _utc_datetime(
+        moment
+        or datetime.now(timezone.utc)
     )
 
-    closed: list[Candle] = []
-
-    for candle in candles:
-
-        candle_time = _utc_datetime(
-            candle.time
-        )
-
-        candle_close = (
-            candle_time
+    closed = [
+        candle
+        for candle in candles
+        if (
+            _utc_datetime(candle.time)
             + timedelta(minutes=1)
+            <= now
         )
-
-        if candle_close <= moment:
-            closed.append(candle)
+    ]
 
     if not closed:
         return None
 
     return max(
         closed,
-        key=lambda x: _utc_datetime(x.time),
+        key=lambda x: _utc_datetime(
+            x.time
+        ),
     )
 
 
-# ============================================================
-# EMA
-# ============================================================
-
-def ema(values, period: int):
+def ema(
+    values,
+    period: int,
+):
 
     values = np.asarray(
         values,
@@ -142,7 +114,7 @@ def ema(values, period: int):
         return result
 
     alpha = 2.0 / (
-        period + 1.0
+        period + 1
     )
 
     result[period - 1] = np.mean(
@@ -155,16 +127,12 @@ def ema(values, period: int):
     ):
         result[i] = (
             alpha * values[i]
-            + (1.0 - alpha)
+            + (1 - alpha)
             * result[i - 1]
         )
 
     return result
 
-
-# ============================================================
-# RSI
-# ============================================================
 
 def rsi(
     values,
@@ -189,14 +157,14 @@ def rsi(
         prepend=values[0],
     )
 
-    gain = np.maximum(
+    gains = np.maximum(
         delta,
-        0.0,
+        0,
     )
 
-    loss = np.maximum(
+    losses = np.maximum(
         -delta,
-        0.0,
+        0,
     )
 
     avg_gain = np.full(
@@ -210,11 +178,11 @@ def rsi(
     )
 
     avg_gain[period] = np.mean(
-        gain[1:period + 1]
+        gains[1:period + 1]
     )
 
     avg_loss[period] = np.mean(
-        loss[1:period + 1]
+        losses[1:period + 1]
     )
 
     for i in range(
@@ -227,7 +195,7 @@ def rsi(
                 avg_gain[i - 1]
                 * (period - 1)
             )
-            + gain[i]
+            + gains[i]
         ) / period
 
         avg_loss[i] = (
@@ -235,7 +203,7 @@ def rsi(
                 avg_loss[i - 1]
                 * (period - 1)
             )
-            + loss[i]
+            + losses[i]
         ) / period
 
     for i in range(
@@ -244,7 +212,6 @@ def rsi(
     ):
 
         if avg_loss[i] == 0:
-
             result[i] = 100.0
 
         else:
@@ -255,30 +222,23 @@ def rsi(
             )
 
             result[i] = (
-                100.0
-                - 100.0
-                / (1.0 + rs)
+                100
+                - 100 / (1 + rs)
             )
 
     return result
 
-
-# ============================================================
-# ATR
-# ============================================================
 
 def atr(
     candles: list[Candle],
     period: int = 14,
 ):
 
-    result = np.full(
-        len(candles),
-        np.nan,
-    )
-
     if len(candles) < period + 1:
-        return result
+        return np.full(
+            len(candles),
+            np.nan,
+        )
 
     highs = np.asarray(
         [c.high for c in candles],
@@ -295,36 +255,26 @@ def atr(
         dtype=float,
     )
 
-    previous_close = np.roll(
+    previous = np.roll(
         closes,
         1,
     )
 
-    true_range = np.maximum(
+    tr = np.maximum(
         highs - lows,
         np.maximum(
-            np.abs(
-                highs - previous_close
-            ),
-            np.abs(
-                lows - previous_close
-            ),
+            abs(highs - previous),
+            abs(lows - previous),
         ),
     )
 
-    true_range[0] = (
-        highs[0] - lows[0]
-    )
+    tr[0] = highs[0] - lows[0]
 
     return ema(
-        true_range,
+        tr,
         period,
     )
 
-
-# ============================================================
-# AGGREGATE
-# ============================================================
 
 def aggregate_candles(
     candles: list[Candle],
@@ -344,17 +294,13 @@ def aggregate_candles(
     )
 
     if timeframe <= 1:
-
         result = list(candles)
 
     else:
 
         seconds = timeframe * 60
 
-        buckets: dict[
-            int,
-            list[Candle],
-        ] = {}
+        buckets = {}
 
         for candle in candles:
 
@@ -373,7 +319,7 @@ def aggregate_candles(
                 [],
             ).append(candle)
 
-        result: list[Candle] = []
+        result = []
 
         for bucket in sorted(
             buckets
@@ -413,36 +359,25 @@ def aggregate_candles(
                 )
             )
 
-    # Убираем незакрытую свечу.
-
     now = datetime.now(
         timezone.utc
-    )
-
-    candle_seconds = (
-        timeframe * 60
     )
 
     if result:
 
         last = result[-1]
 
-        candle_close = (
+        if (
             _utc_datetime(last.time)
             + timedelta(
-                seconds=candle_seconds
+                minutes=timeframe
             )
-        )
-
-        if candle_close > now:
-            result = result[:-1]
+            > now
+        ):
+            result.pop()
 
     return result
 
-
-# ============================================================
-# SIGNAL ENGINE
-# ============================================================
 
 class SignalEngine:
 
@@ -463,145 +398,72 @@ class SignalEngine:
         if not candles:
             return None
 
-        # ====================================================
-        # CURRENT TIME
-        # ====================================================
-
-        signal_moment = datetime.now(
+        now = datetime.now(
             timezone.utc
         )
 
-        # ====================================================
-        # LAST CLOSED M1
-        # ====================================================
-
-        entry_candle = _last_closed_m1(
+        last_m1 = _last_closed_m1(
             candles,
-            signal_moment,
+            now,
         )
 
-        if entry_candle is None:
+        if last_m1 is None:
             return None
 
         entry_price = float(
-            entry_candle.close
+            last_m1.close
         )
 
-        # ====================================================
-        # EXACT ENTRY TIME
-        # ====================================================
-        #
-        # ВАЖНО:
-        #
-        # Раньше время входа строилось напрямую
-        # из timestamp свечи:
-        #
-        # candle_time + 1 min
-        #
-        # Из-за этого ошибка timezone/будущий
-        # timestamp провайдера могла дать:
-        #
-        # сейчас 20:55
-        # вход 23:58
-        #
-        # Теперь вход всегда привязан к реальному
-        # времени сервера.
-        #
-        # 20:55:01 -> 20:56
-        # 20:55:59 -> 20:56
-        #
-        # ====================================================
-
+        # Вход всегда на следующей
+        # полной минуте реального UTC.
         entry_time = _next_minute(
-            signal_moment
+            now
         )
 
-        # ====================================================
-        # SAFETY CHECK
-        # ====================================================
-
-        entry_time = _utc_datetime(
+        close_time = (
             entry_time
+            + timedelta(
+                minutes=timeframe
+            )
         )
 
-        # Вход не может быть раньше текущего момента.
-        if entry_time <= signal_moment:
-
-            entry_time = (
-                signal_moment
-                + timedelta(
-                    minutes=1
-                )
-            ).replace(
-                second=0,
-                microsecond=0,
-            )
-
-        # ====================================================
-        # AGGREGATED CANDLES
-        # ====================================================
-
-        candles_tf = aggregate_candles(
+        data = aggregate_candles(
             candles,
             timeframe,
         )
 
-        if len(candles_tf) < self.MIN_CANDLES:
+        if len(data) < self.MIN_CANDLES:
             return None
 
         close = np.asarray(
-            [
-                c.close
-                for c in candles_tf
-            ],
+            [c.close for c in data],
             dtype=float,
         )
 
         high = np.asarray(
-            [
-                c.high
-                for c in candles_tf
-            ],
+            [c.high for c in data],
             dtype=float,
         )
 
         low = np.asarray(
-            [
-                c.low
-                for c in candles_tf
-            ],
+            [c.low for c in data],
             dtype=float,
         )
 
         volume = np.asarray(
-            [
-                c.volume
-                for c in candles_tf
-            ],
+            [c.volume for c in data],
             dtype=float,
         )
 
         if not (
-            np.all(
-                np.isfinite(close)
-            )
-            and np.all(
-                np.isfinite(high)
-            )
-            and np.all(
-                np.isfinite(low)
-            )
+            np.all(np.isfinite(close))
+            and np.all(np.isfinite(high))
+            and np.all(np.isfinite(low))
         ):
             return None
 
-        if np.any(
-            close <= 0
-        ):
+        if np.any(close <= 0):
             return None
-
-        # ====================================================
-        # INDICATORS
-        # ====================================================
 
         ema9 = ema(
             close,
@@ -624,7 +486,7 @@ class SignalEngine:
         )
 
         atr14 = atr(
-            candles_tf,
+            data,
             14,
         )
 
@@ -637,12 +499,30 @@ class SignalEngine:
             atr14[-1]
         )
 
+        price = float(
+            close[-1]
+        )
+
         if current_atr <= 0:
             return None
 
-        # ====================================================
+        atr_percent = (
+            current_atr
+            / price
+            * 100
+        )
+
+        # Слишком мёртвый или аномально
+        # волатильный рынок пропускаем.
+        if (
+            atr_percent < 0.01
+            or atr_percent > 5.0
+        ):
+            return None
+
+        # -----------------------------
         # MACD
-        # ====================================================
+        # -----------------------------
 
         ema12 = ema(
             close,
@@ -655,19 +535,18 @@ class SignalEngine:
         )
 
         macd = (
-            ema12
-            - ema26
+            ema12 - ema26
         )
 
-        valid_macd = macd[
+        valid = macd[
             np.isfinite(macd)
         ]
 
-        if len(valid_macd) < 20:
+        if len(valid) < 20:
             return None
 
         macd_signal_array = ema(
-            valid_macd,
+            valid,
             9,
         )
 
@@ -684,36 +563,41 @@ class SignalEngine:
             macd_signal_array[-1]
         )
 
-        # ====================================================
-        # BOLLINGER
-        # ====================================================
+        macd_hist = (
+            macd_value
+            - macd_signal
+        )
+
+        # -----------------------------
+        # Bollinger
+        # -----------------------------
 
         if len(close) < 20:
             return None
 
-        bb_window = close[-20:]
+        window = close[-20:]
 
         bb_middle = float(
-            np.mean(bb_window)
+            np.mean(window)
         )
 
         bb_std = float(
-            np.std(bb_window)
+            np.std(window)
         )
 
         bb_upper = (
             bb_middle
-            + 2.0 * bb_std
+            + 2 * bb_std
         )
 
         bb_lower = (
             bb_middle
-            - 2.0 * bb_std
+            - 2 * bb_std
         )
 
-        # ====================================================
-        # STOCHASTIC
-        # ====================================================
+        # -----------------------------
+        # Stochastic
+        # -----------------------------
 
         highest = float(
             np.max(high[-14:])
@@ -723,57 +607,84 @@ class SignalEngine:
             np.min(low[-14:])
         )
 
-        price = float(
-            close[-1]
-        )
-
         if highest == lowest:
-
             stochastic = 50.0
-
         else:
-
             stochastic = (
-                100.0
+                100
                 * (price - lowest)
                 / (highest - lowest)
             )
 
-        # ====================================================
-        # MOMENTUM
-        # ====================================================
+        # -----------------------------
+        # Momentum
+        # -----------------------------
 
-        lookback = min(
+        lb = min(
             12,
             len(close) - 1,
         )
 
         momentum = (
             price
-            - float(
-                close[
-                    -1 - lookback
-                ]
-            )
+            - close[-1 - lb]
         )
 
-        short_lookback = min(
+        short_lb = min(
             3,
             len(close) - 1,
         )
 
         short_momentum = (
             price
-            - float(
-                close[
-                    -1 - short_lookback
-                ]
-            )
+            - close[-1 - short_lb]
         )
 
-        # ====================================================
-        # VOLUME
-        # ====================================================
+        # -----------------------------
+        # EMA slope
+        # -----------------------------
+
+        ema21_slope = (
+            ema21[-1]
+            - ema21[-4]
+            if len(ema21) >= 4
+            else 0
+        )
+
+        # -----------------------------
+        # Support / resistance
+        # -----------------------------
+
+        support = float(
+            np.min(low[-20:])
+        )
+
+        resistance = float(
+            np.max(high[-20:])
+        )
+
+        # -----------------------------
+        # Candle
+        # -----------------------------
+
+        candle = data[-1]
+
+        candle_range = (
+            candle.high
+            - candle.low
+        )
+
+        if candle_range > 0:
+            body_ratio = abs(
+                candle.close
+                - candle.open
+            ) / candle_range
+        else:
+            body_ratio = 0.0
+
+        # -----------------------------
+        # Volume
+        # -----------------------------
 
         volume_ratio = 1.0
 
@@ -781,474 +692,285 @@ class SignalEngine:
 
             avg_volume = float(
                 np.mean(
-                    volume[-20:]
+                    volume[-20:-1]
                 )
             )
 
             if avg_volume > 0:
-
                 volume_ratio = (
-                    float(
-                        volume[-1]
-                    )
+                    float(volume[-1])
                     / avg_volume
                 )
 
-        # ====================================================
-        # SUPPORT / RESISTANCE
-        # ====================================================
+        up_score = 0.0
+        down_score = 0.0
 
-        support = float(
-            np.min(
-                low[-30:]
-            )
-        )
+        reasons_up = []
+        reasons_down = []
 
-        resistance = float(
-            np.max(
-                high[-30:]
-            )
-        )
-
-        range_size = max(
-            resistance - support,
-            1e-12,
-        )
-
-        position = (
-            price - support
-        ) / range_size
-
-        # ====================================================
-        # CANDLE
-        # ====================================================
-
-        last_candle = candles_tf[-1]
-
-        candle_range = max(
-            last_candle.high
-            - last_candle.low,
-            1e-12,
-        )
-
-        candle_body = abs(
-            last_candle.close
-            - last_candle.open
-        )
-
-        body_ratio = (
-            candle_body
-            / candle_range
-        )
-
-        bullish_candle = (
-            last_candle.close
-            > last_candle.open
-        )
-
-        bearish_candle = (
-            last_candle.close
-            < last_candle.open
-        )
-
-        # ====================================================
-        # SCORES
-        # ====================================================
-
-        up = 0.0
-        down = 0.0
-
-        up_reasons: list[str] = []
-        down_reasons: list[str] = []
-
-        # ====================================================
-        # EMA
-        # ====================================================
-
+        # EMA trend
         if (
-            np.isfinite(ema9[-1])
-            and np.isfinite(ema21[-1])
-            and np.isfinite(ema50[-1])
+            ema9[-1] > ema21[-1]
+            > ema50[-1]
         ):
 
-            if (
-                ema9[-1]
-                > ema21[-1]
-                > ema50[-1]
-            ):
-
-                up += 20
-
-                up_reasons.append(
-                    "EMA 9/21/50 подтверждают восходящий тренд"
-                )
-
-            elif (
-                ema9[-1]
-                < ema21[-1]
-                < ema50[-1]
-            ):
-
-                down += 20
-
-                down_reasons.append(
-                    "EMA 9/21/50 подтверждают нисходящий тренд"
-                )
-
-            elif ema9[-1] > ema21[-1]:
-
-                up += 7
-
-            elif ema9[-1] < ema21[-1]:
-
-                down += 7
-
-        # ====================================================
-        # EMA SLOPE
-        # ====================================================
-
-        if (
-            len(ema21) >= 4
-            and np.isfinite(
-                ema21[-1]
+            up_score += 20
+            reasons_up.append(
+                "EMA9 > EMA21 > EMA50"
             )
-            and np.isfinite(
-                ema21[-4]
-            )
+
+        elif (
+            ema9[-1] < ema21[-1]
+            < ema50[-1]
         ):
 
-            slope = (
-                ema21[-1]
-                - ema21[-4]
+            down_score += 20
+            reasons_down.append(
+                "EMA9 < EMA21 < EMA50"
             )
 
-            if slope > 0:
+        elif ema9[-1] > ema21[-1]:
 
-                up += 8
+            up_score += 7
+            reasons_up.append(
+                "EMA9 выше EMA21"
+            )
 
-                up_reasons.append(
-                    "EMA 21 имеет положительный наклон"
-                )
+        elif ema9[-1] < ema21[-1]:
 
-            elif slope < 0:
+            down_score += 7
+            reasons_down.append(
+                "EMA9 ниже EMA21"
+            )
 
-                down += 8
+        # EMA slope
+        if ema21_slope > 0:
+            up_score += 8
+            reasons_up.append(
+                "EMA21 растёт"
+            )
 
-                down_reasons.append(
-                    "EMA 21 имеет отрицательный наклон"
-                )
+        elif ema21_slope < 0:
+            down_score += 8
+            reasons_down.append(
+                "EMA21 снижается"
+            )
 
-        # ====================================================
         # RSI
-        # ====================================================
-
         current_rsi = float(
             rsi14[-1]
         )
 
-        if np.isfinite(
-            current_rsi
-        ):
+        if 52 <= current_rsi <= 68:
 
-            if 52 <= current_rsi <= 68:
+            up_score += 15
+            reasons_up.append(
+                f"RSI {current_rsi:.1f}"
+            )
 
-                up += 15
+        elif 32 <= current_rsi <= 48:
 
-                up_reasons.append(
-                    f"RSI {current_rsi:.1f} поддерживает UP"
-                )
+            down_score += 15
+            reasons_down.append(
+                f"RSI {current_rsi:.1f}"
+            )
 
-            elif 32 <= current_rsi <= 48:
+        elif current_rsi < 30:
 
-                down += 15
+            up_score += 10
+            reasons_up.append(
+                "RSI перепродан"
+            )
 
-                down_reasons.append(
-                    f"RSI {current_rsi:.1f} поддерживает DOWN"
-                )
+        elif current_rsi > 70:
 
-            elif current_rsi < 30:
+            down_score += 10
+            reasons_down.append(
+                "RSI перекуплен"
+            )
 
-                up += 10
-
-                up_reasons.append(
-                    f"RSI {current_rsi:.1f} — перепроданность"
-                )
-
-            elif current_rsi > 70:
-
-                down += 10
-
-                down_reasons.append(
-                    f"RSI {current_rsi:.1f} — перекупленность"
-                )
-
-        # ====================================================
         # MACD
-        # ====================================================
-
         if macd_value > macd_signal:
 
-            up += 15
-
-            up_reasons.append(
-                "MACD подтверждает UP"
+            up_score += 15
+            reasons_up.append(
+                "MACD bullish"
             )
 
         elif macd_value < macd_signal:
 
-            down += 15
-
-            down_reasons.append(
-                "MACD подтверждает DOWN"
+            down_score += 15
+            reasons_down.append(
+                "MACD bearish"
             )
 
-        # ====================================================
-        # MACD HISTOGRAM
-        # ====================================================
+        if macd_hist > 0:
+            up_score += 5
 
-        histogram = (
-            macd_value
-            - macd_signal
-        )
+        elif macd_hist < 0:
+            down_score += 5
 
-        previous_histogram = (
-            float(
-                macd[-2]
-            )
-            - float(
-                macd_signal_array[-2]
-            )
-        )
-
-        if (
-            histogram > 0
-            and histogram
-            > previous_histogram
-        ):
-
-            up += 5
-
-            up_reasons.append(
-                "MACD histogram усиливается вверх"
-            )
-
-        elif (
-            histogram < 0
-            and histogram
-            < previous_histogram
-        ):
-
-            down += 5
-
-            down_reasons.append(
-                "MACD histogram усиливается вниз"
-            )
-
-        # ====================================================
-        # BOLLINGER
-        # ====================================================
-
+        # Bollinger
         if price <= bb_lower:
 
-            up += 10
-
-            up_reasons.append(
-                "Цена возле нижней Bollinger Band"
+            up_score += 10
+            reasons_up.append(
+                "Цена у нижней Bollinger"
             )
 
         elif price >= bb_upper:
 
-            down += 10
-
-            down_reasons.append(
-                "Цена возле верхней Bollinger Band"
+            down_score += 10
+            reasons_down.append(
+                "Цена у верхней Bollinger"
             )
 
         elif price > bb_middle:
 
-            up += 4
+            up_score += 4
 
         elif price < bb_middle:
 
-            down += 4
+            down_score += 4
 
-        # ====================================================
-        # STOCHASTIC
-        # ====================================================
+        # Stochastic
+        if stochastic < 20:
 
-        if stochastic <= 20:
-
-            up += 10
-
-            up_reasons.append(
-                f"Stochastic {stochastic:.1f} — перепроданность"
+            up_score += 10
+            reasons_up.append(
+                "Stochastic перепродан"
             )
 
-        elif stochastic >= 80:
+        elif stochastic > 80:
 
-            down += 10
-
-            down_reasons.append(
-                f"Stochastic {stochastic:.1f} — перекупленность"
+            down_score += 10
+            reasons_down.append(
+                "Stochastic перекуплен"
             )
 
-        elif stochastic > 55:
+        elif stochastic > 50:
 
-            up += 4
+            up_score += 4
 
-        elif stochastic < 45:
+        else:
 
-            down += 4
+            down_score += 4
 
-        # ====================================================
-        # MOMENTUM
-        # ====================================================
-
+        # Momentum
         if momentum > 0:
 
-            up += 10
-
-            up_reasons.append(
+            up_score += 10
+            reasons_up.append(
                 "Положительный momentum"
             )
 
         elif momentum < 0:
 
-            down += 10
-
-            down_reasons.append(
+            down_score += 10
+            reasons_down.append(
                 "Отрицательный momentum"
             )
 
-        # ====================================================
-        # SHORT MOMENTUM
-        # ====================================================
-
+        # Short momentum
         if short_momentum > 0:
 
-            up += 5
+            up_score += 5
 
         elif short_momentum < 0:
 
-            down += 5
+            down_score += 5
 
-        # ====================================================
-        # SUPPORT / RESISTANCE
-        # ====================================================
+        # Support / resistance
+        distance_support = (
+            abs(price - support)
+            / price
+            * 100
+        )
 
-        if position <= 0.18:
+        distance_resistance = (
+            abs(resistance - price)
+            / price
+            * 100
+        )
 
-            up += 10
+        if distance_support < 0.15:
 
-            up_reasons.append(
+            up_score += 10
+            reasons_up.append(
                 "Цена возле поддержки"
             )
 
-        elif position >= 0.82:
+        if distance_resistance < 0.15:
 
-            down += 10
-
-            down_reasons.append(
+            down_score += 10
+            reasons_down.append(
                 "Цена возле сопротивления"
             )
 
-        # ====================================================
-        # CANDLE CONFIRMATION
-        # ====================================================
+        # Candle confirmation
+        if (
+            candle.close
+            > candle.open
+            and body_ratio >= 0.25
+        ):
 
-        if body_ratio >= 0.55:
+            up_score += 5
+            reasons_up.append(
+                "Бычья свеча"
+            )
 
-            if bullish_candle:
+        elif (
+            candle.close
+            < candle.open
+            and body_ratio >= 0.25
+        ):
 
-                up += 5
+            down_score += 5
+            reasons_down.append(
+                "Медвежья свеча"
+            )
 
-                up_reasons.append(
-                    "Сильная бычья свеча"
+        # Volume
+        if volume_ratio >= 1.20:
+
+            if up_score >= down_score:
+                up_score += 5
+                reasons_up.append(
+                    "Повышенный объём"
+                )
+            else:
+                down_score += 5
+                reasons_down.append(
+                    "Повышенный объём"
                 )
 
-            elif bearish_candle:
+        # -----------------------------
+        # Direction
+        # -----------------------------
 
-                down += 5
-
-                down_reasons.append(
-                    "Сильная медвежья свеча"
-                )
-
-        # ====================================================
-        # VOLUME
-        # ====================================================
-
-        if volume_ratio >= 1.10:
-
-            if up > down:
-
-                up += 5
-
-                up_reasons.append(
-                    "Объём выше среднего"
-                )
-
-            elif down > up:
-
-                down += 5
-
-                down_reasons.append(
-                    "Объём выше среднего"
-                )
-
-        # ====================================================
-        # VOLATILITY
-        # ====================================================
-
-        atr_percent = (
-            current_atr
-            / price
-            * 100.0
-        )
-
-        if atr_percent < 0.01:
-            return None
-
-        if atr_percent > 5.0:
-            return None
-
-        # ====================================================
-        # DIRECTION
-        # ====================================================
-
-        if up > down:
+        if up_score >= down_score:
 
             direction = "UP"
-            score = up
-            opposite = down
-            reasons = up_reasons
-
-        elif down > up:
-
-            direction = "DOWN"
-            score = down
-            opposite = up
-            reasons = down_reasons
+            score = up_score
+            opposite = down_score
+            reasons = reasons_up
 
         else:
 
-            return None
+            direction = "DOWN"
+            score = down_score
+            opposite = up_score
+            reasons = reasons_down
 
-        # ====================================================
-        # GAP
-        # ====================================================
+        gap = score - opposite
 
-        gap = (
-            score
-            - opposite
-        )
-
+        # Слабое преимущество запрещаем.
         if gap < 15:
             return None
 
-        # ====================================================
-        # QUALITY
-        # ====================================================
+        # -----------------------------
+        # Quality
+        # -----------------------------
 
         quality = min(
             100.0,
@@ -1264,10 +986,10 @@ class SignalEngine:
         )
 
         if body_ratio < 0.25:
-            quality -= 5.0
+            quality -= 5
 
         if volume_ratio >= 1.20:
-            quality += 3.0
+            quality += 3
 
         quality = min(
             100.0,
@@ -1277,28 +999,22 @@ class SignalEngine:
             ),
         )
 
-        # ====================================================
-        # TECHNICAL CONFIDENCE
-        # НЕ WINRATE
-        # ====================================================
+        # -----------------------------
+        # Technical confidence
+        # -----------------------------
 
         confirmation_count = len(
             reasons
         )
 
-        confirmation_bonus = min(
-            5.0,
-            confirmation_count * 0.5,
-        )
-
         probability = (
-            50.0
+            50
             + quality * 0.38
+            + min(gap, 30) * 0.18
             + min(
-                gap,
-                30.0,
-            ) * 0.18
-            + confirmation_bonus
+                5,
+                confirmation_count * 0.5,
+            )
         )
 
         probability = min(
@@ -1309,87 +1025,32 @@ class SignalEngine:
             ),
         )
 
-        # ====================================================
-        # CONFIG FILTER
-        # ====================================================
+        # -----------------------------
+        # Strict filters
+        # -----------------------------
 
-        min_quality = float(
-            getattr(
-                config,
-                "MIN_SIGNAL_SCORE",
-                75.0,
-            )
-        )
-
-        min_probability = float(
-            getattr(
-                config,
-                "MIN_PROBABILITY",
-                75.0,
-            )
-        )
-
-        if quality < min_quality:
+        if quality < float(
+            config.min_signal_score
+        ):
             return None
 
-        if probability < min_probability:
+        if probability < float(
+            config.min_probability
+        ):
             return None
 
-        # ====================================================
-        # CLOSE TIME
-        # ====================================================
-
-        close_time = (
-            entry_time
-            + timedelta(
-                minutes=timeframe
-            )
-        )
-
-        # ====================================================
-        # REASONS
-        # ====================================================
-
-        reasons = list(
-            dict.fromkeys(
-                reasons
-            )
-        )
-
-        if gap >= 30:
-
-            reasons.append(
-                f"Преимущество направления: {gap:.1f} балла"
-            )
-
-        if atr_percent >= 0.03:
-
-            reasons.append(
-                "ATR подтверждает достаточную "
-                f"волатильность ({atr_percent:.2f}%)"
-            )
-
-        if volume_ratio >= 1.10:
-
-            reasons.append(
-                f"Объём: {volume_ratio:.2f}x от среднего"
-            )
-
-        # ====================================================
-        # RESULT
-        # ====================================================
+        if not reasons:
+            return None
 
         return SignalResult(
             pair=pair,
             timeframe=timeframe,
             direction=direction,
-            probability=round(
-                probability,
-                2,
+            probability=float(
+                probability
             ),
-            quality=round(
-                quality,
-                2,
+            quality=float(
+                quality
             ),
             entry_time=entry_time,
             close_time=close_time,
