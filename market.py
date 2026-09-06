@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import multiprocessing
 import os
+import queue
 import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+
 
 from config import config
 
@@ -20,31 +23,22 @@ logger = logging.getLogger("pocket_market")
 # TIMEOUTS
 # ============================================================
 
-# Максимальное время создания PocketOptionAsync.
 CONNECT_TIMEOUT = 30
 
-# Максимальное время автоматического получения SSID.
 AUTO_LOGIN_TIMEOUT = 120
 
-# Максимальное время одной операции balance().
 BALANCE_TIMEOUT = 15
 
-# Максимальное время одного запроса свечей.
 CANDLE_REQUEST_TIMEOUT = 20
 
-# Максимальное время закрытия клиента.
 CLIENT_CLOSE_TIMEOUT = 5
 
-# Время ожидания после создания клиента.
 WEBSOCKET_INIT_DELAY = 5
 
-# Подготовка Playwright.
 PLAYWRIGHT_PREPARE_TIMEOUT = 60
 
-# Внутренний timeout библиотеки login().
 LOGIN_LIBRARY_TIMEOUT = 90
 
-# Общий запас для проверки рынка.
 MARKET_TEST_CONNECT_EXTRA = 30
 
 
@@ -60,6 +54,78 @@ class Candle:
     low: float
     close: float
     volume: float = 0.0
+
+
+# ============================================================
+# AUTO LOGIN PROCESS WORKER
+# ============================================================
+
+def _pocket_login_worker(
+    result_queue: Any,
+    email: str,
+    password: str,
+    demo: bool,
+    headless: bool,
+    timeout: int,
+) -> None:
+    """
+    Выполняется в отдельном процессе.
+
+    Это важно потому, что asyncio.wait_for() НЕ может
+    физически остановить зависший Python thread.
+
+    Отдельный process можно завершить через terminate().
+    """
+
+    try:
+        logger = logging.getLogger("pocket_market.login_worker")
+
+        logger.info(
+            "[LOGIN WORKER] Импортирую BinaryOptionsToolsV2..."
+        )
+
+        from BinaryOptionsToolsV2.pocketoption.tools.login import (
+            login,
+        )
+
+        logger.info(
+            "[LOGIN WORKER] Запускаю Pocket Option login..."
+        )
+
+        ssid = login(
+            email,
+            password,
+            demo=demo,
+            backend="playwright",
+            headless=headless,
+            timeout=timeout,
+        )
+
+        if ssid:
+            result_queue.put(
+                (
+                    "ok",
+                    str(ssid),
+                )
+            )
+        else:
+            result_queue.put(
+                (
+                    "error",
+                    "login() вернул пустой SSID.",
+                )
+            )
+
+    except BaseException as exc:
+        try:
+            result_queue.put(
+                (
+                    "error",
+                    f"{type(exc).__name__}: {exc}",
+                )
+            )
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -154,8 +220,6 @@ class PocketMarket:
                 browser_path
             ):
 
-                # Не используем dirs напрямую,
-                # но оставляем os.walk совместимым.
                 _ = dirs
 
                 for filename in files:
@@ -234,10 +298,6 @@ class PocketMarket:
     def _install_chromium(
         browser_path: str,
     ) -> None:
-        """
-        Устанавливает Chromium через текущую
-        установленную версию Playwright.
-        """
 
         logger.warning(
             "Playwright Chromium отсутствует. "
@@ -286,8 +346,7 @@ class PocketMarket:
 
             raise RuntimeError(
                 "Не удалось запустить установку "
-                "Chromium: "
-                f"{exc}"
+                f"Chromium: {exc}"
             ) from exc
 
         output = (
@@ -311,14 +370,24 @@ class PocketMarket:
             )
 
     # ========================================================
+    # SAFE CHROMIUM TEST
+    # ========================================================
 
     @staticmethod
     def _launch_test_browser(
         executable_path: str | None = None,
     ) -> None:
         """
-        Проверяет реальный запуск Chromium
-        в окружении Render.
+        Проверяет реальный запуск Chromium.
+
+        Для Render:
+        - no-sandbox
+        - disable-dev-shm-usage
+        - disable-gpu
+        - no-zygote
+
+        При ETXTBSY пробуем запустить Chromium
+        через системный /tmp-клон executable.
         """
 
         from playwright.sync_api import (
@@ -353,11 +422,92 @@ class PocketMarket:
                     "[PLAYWRIGHT] Проверяю запуск Chromium..."
                 )
 
-                browser = (
-                    pw.chromium.launch(
-                        **launch_kwargs
+                try:
+
+                    browser = (
+                        pw.chromium.launch(
+                            **launch_kwargs
+                        )
                     )
-                )
+
+                except Exception as first_exc:
+
+                    error_text = str(
+                        first_exc
+                    )
+
+                    logger.error(
+                        "[PLAYWRIGHT] Первый запуск Chromium "
+                        "не удался: %s",
+                        error_text,
+                    )
+
+                    if "ETXTBSY" not in error_text.upper():
+
+                        raise
+
+                    # =================================================
+                    # ETXTBSY FIX
+                    # =================================================
+                    #
+                    # Render иногда возвращает ETXTBSY, когда
+                    # executable находится в cache/overlay filesystem.
+                    #
+                    # Делаем копию бинарника в /tmp и запускаем уже
+                    # копию.
+                    # =================================================
+
+                    if not executable_path:
+
+                        raise
+
+                    import shutil
+                    import tempfile
+
+                    tmp_dir = tempfile.mkdtemp(
+                        prefix="po_chromium_",
+                        dir="/tmp",
+                    )
+
+                    tmp_executable = os.path.join(
+                        tmp_dir,
+                        "chrome",
+                    )
+
+                    logger.warning(
+                        "[PLAYWRIGHT] Обнаружен ETXTBSY. "
+                        "Копирую Chromium в %s",
+                        tmp_executable,
+                    )
+
+                    shutil.copy2(
+                        executable_path,
+                        tmp_executable,
+                    )
+
+                    os.chmod(
+                        tmp_executable,
+                        0o755,
+                    )
+
+                    retry_kwargs = dict(
+                        launch_kwargs
+                    )
+
+                    retry_kwargs[
+                        "executable_path"
+                    ] = tmp_executable
+
+                    browser = (
+                        pw.chromium.launch(
+                            **retry_kwargs
+                        )
+                    )
+
+                    logger.info(
+                        "[PLAYWRIGHT] Chromium успешно "
+                        "запущен из /tmp-копии."
+                    )
 
                 logger.info(
                     "[PLAYWRIGHT] Chromium "
@@ -382,6 +532,7 @@ class PocketMarket:
             if browser is not None:
 
                 try:
+
                     browser.close()
 
                 except Exception:
@@ -397,9 +548,6 @@ class PocketMarket:
 
     @staticmethod
     def _prepare_playwright_environment() -> None:
-        """
-        Подготавливает Playwright для Render.
-        """
 
         browser_path = (
             PocketMarket
@@ -452,8 +600,7 @@ class PocketMarket:
 
             logger.warning(
                 "Не удалось получить browser "
-                "paths из Playwright: %s",
-                exc,
+                f"paths из Playwright: {exc}"
             )
 
         logger.info(
@@ -490,9 +637,9 @@ class PocketMarket:
             firefox_exists,
         )
 
-        # ----------------------------------------------------
-        # INSTALL CHROMIUM
-        # ----------------------------------------------------
+        # ====================================================
+        # INSTALL
+        # ====================================================
 
         if not chromium_exists:
 
@@ -531,9 +678,9 @@ class PocketMarket:
                 )
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # MANUAL SEARCH
-        # ----------------------------------------------------
+        # ====================================================
 
         if not chromium_exists:
 
@@ -576,9 +723,9 @@ class PocketMarket:
                 chromium_path = candidate
                 chromium_exists = True
 
-        # ----------------------------------------------------
+        # ====================================================
         # FINAL CHECK
-        # ----------------------------------------------------
+        # ====================================================
 
         if not chromium_exists:
 
@@ -599,20 +746,213 @@ class PocketMarket:
         )
 
     # ========================================================
+    # RUN LOGIN PROCESS
+    # ========================================================
+
+    async def _run_login_process(
+        self,
+        email: str,
+        password: str,
+        demo: bool,
+    ) -> str:
+
+        logger.info(
+            "[AUTO LOGIN] Создаю отдельный process "
+            "для Pocket Option login..."
+        )
+
+        try:
+
+            ctx = multiprocessing.get_context(
+                "spawn"
+            )
+
+        except Exception as exc:
+
+            raise RuntimeError(
+                "Не удалось создать multiprocessing "
+                "context: "
+                f"{exc}"
+            ) from exc
+
+        result_queue = ctx.Queue()
+
+        process = ctx.Process(
+            target=_pocket_login_worker,
+            args=(
+                result_queue,
+                email,
+                password,
+                demo,
+                True,
+                LOGIN_LIBRARY_TIMEOUT,
+            ),
+            daemon=True,
+        )
+
+        try:
+
+            process.start()
+
+        except Exception as exc:
+
+            try:
+                result_queue.close()
+            except Exception:
+                pass
+
+            raise RuntimeError(
+                "Не удалось запустить login process: "
+                f"{exc}"
+            ) from exc
+
+        logger.info(
+            "[AUTO LOGIN] Login process started. PID=%s",
+            process.pid,
+        )
+
+        loop = asyncio.get_running_loop()
+
+        deadline = (
+            loop.time()
+            + AUTO_LOGIN_TIMEOUT
+        )
+
+        try:
+
+            while loop.time() < deadline:
+
+                # ---------------------------------------------
+                # CHECK RESULT
+                # ---------------------------------------------
+
+                try:
+
+                    result_type, result_value = (
+                        result_queue.get_nowait()
+                    )
+
+                except queue.Empty:
+
+                    result_type = None
+                    result_value = None
+
+                if result_type == "ok":
+
+                    logger.info(
+                        "[AUTO LOGIN] Login process "
+                        "вернул SSID."
+                    )
+
+                    return str(
+                        result_value
+                    ).strip()
+
+                if result_type == "error":
+
+                    raise RuntimeError(
+                        str(
+                            result_value
+                        )
+                    )
+
+                # ---------------------------------------------
+                # PROCESS EXITED
+                # ---------------------------------------------
+
+                if not process.is_alive():
+
+                    exit_code = (
+                        process.exitcode
+                    )
+
+                    raise RuntimeError(
+                        "Login process завершился "
+                        "без результата. "
+                        f"Exit code: {exit_code}"
+                    )
+
+                await asyncio.sleep(
+                    0.25
+                )
+
+            # =================================================
+            # HARD TIMEOUT
+            # =================================================
+
+            logger.error(
+                "[AUTO LOGIN] ❌ Login process "
+                "превысил hard timeout %s секунд.",
+                AUTO_LOGIN_TIMEOUT,
+            )
+
+            raise asyncio.TimeoutError
+
+        finally:
+
+            if process.is_alive():
+
+                logger.warning(
+                    "[AUTO LOGIN] Завершаю зависший "
+                    "login process PID=%s...",
+                    process.pid,
+                )
+
+                try:
+
+                    process.terminate()
+
+                except Exception:
+
+                    logger.exception(
+                        "Ошибка terminate login process."
+                    )
+
+                try:
+
+                    process.join(
+                        timeout=3
+                    )
+
+                except Exception:
+
+                    logger.exception(
+                        "Ошибка ожидания завершения "
+                        "login process."
+                    )
+
+                if process.is_alive():
+
+                    logger.error(
+                        "[AUTO LOGIN] Login process "
+                        "не завершился после terminate()."
+                    )
+
+            else:
+
+                try:
+
+                    process.join(
+                        timeout=1
+                    )
+
+                except Exception:
+
+                    pass
+
+            try:
+
+                result_queue.close()
+
+            except Exception:
+
+                pass
+
+    # ========================================================
     # AUTO LOGIN
     # ========================================================
 
     async def auto_login(self) -> str:
-        """
-        Автоматическая авторизация Pocket Option.
-
-        Использует официальный login helper
-        BinaryOptionsToolsV2.
-
-        Важно:
-        login() синхронный, поэтому он выполняется
-        в отдельном thread и не блокирует asyncio.
-        """
 
         logger.info(
             "[AUTO LOGIN] STEP 1/5: "
@@ -646,9 +986,9 @@ class PocketMarket:
             config.po_demo,
         )
 
-        # ----------------------------------------------------
-        # PLAYWRIGHT PREPARATION
-        # ----------------------------------------------------
+        # ====================================================
+        # PLAYWRIGHT
+        # ====================================================
 
         logger.info(
             "[AUTO LOGIN] STEP 3/5: "
@@ -702,110 +1042,44 @@ class PocketMarket:
                 f"{exc}"
             ) from exc
 
-        # ----------------------------------------------------
-        # LOGIN IMPORT
-        # ----------------------------------------------------
+        # ====================================================
+        # LOGIN
+        # ====================================================
 
         logger.info(
             "[AUTO LOGIN] STEP 4/5: "
-            "Загружаю BinaryOptionsToolsV2 login..."
+            "Подготавливаю отдельный login process..."
         )
 
-        try:
+        logger.info(
+            "[AUTO LOGIN] Backend: playwright"
+        )
 
-            from BinaryOptionsToolsV2.pocketoption.tools.login import (
-                login,
-            )
+        logger.info(
+            "[AUTO LOGIN] Library timeout: %s сек.",
+            LOGIN_LIBRARY_TIMEOUT,
+        )
 
-        except Exception as exc:
-
-            self.last_error = str(
-                exc
-            )
-
-            logger.exception(
-                "[AUTO LOGIN] ❌ "
-                "Не удалось импортировать login."
-            )
-
-            raise RuntimeError(
-                "Не удалось импортировать "
-                "BinaryOptionsToolsV2 Pocket Option login: "
-                f"{exc}"
-            ) from exc
-
-        # ----------------------------------------------------
-        # LOGIN
-        # ----------------------------------------------------
+        logger.info(
+            "[AUTO LOGIN] Hard timeout: %s сек.",
+            AUTO_LOGIN_TIMEOUT,
+        )
 
         logger.info(
             "[AUTO LOGIN] STEP 5/5: "
             "Запускаю вход в Pocket Option..."
         )
 
-        logger.info(
-            "[AUTO LOGIN] "
-            "Backend: playwright"
-        )
-
-        logger.info(
-            "[AUTO LOGIN] "
-            "Library timeout: %s сек.",
-            LOGIN_LIBRARY_TIMEOUT,
-        )
-
-        logger.info(
-            "[AUTO LOGIN] "
-            "Overall timeout: %s сек.",
-            AUTO_LOGIN_TIMEOUT,
-        )
-
         try:
 
-            # login() является синхронной функцией.
-            #
-            # Поэтому запускаем её в отдельном thread.
-            #
-            # Это предотвращает блокировку Telegram
-            # event loop.
-
-            login_task = asyncio.create_task(
-                asyncio.to_thread(
-                    login,
-                    config.po_email,
-                    config.po_password,
+            ssid = await asyncio.wait_for(
+                self._run_login_process(
+                    email=config.po_email,
+                    password=config.po_password,
                     demo=config.po_demo,
-                    backend="playwright",
-                    headless=True,
-                    timeout=LOGIN_LIBRARY_TIMEOUT,
-                )
+                ),
+                timeout=AUTO_LOGIN_TIMEOUT + 5,
             )
-
-            try:
-
-                ssid = await asyncio.wait_for(
-                    login_task,
-                    timeout=AUTO_LOGIN_TIMEOUT,
-                )
-
-            except asyncio.TimeoutError:
-
-                logger.error(
-                    "[AUTO LOGIN] ❌ "
-                    "login() не вернул результат "
-                    "за %s секунд.",
-                    AUTO_LOGIN_TIMEOUT,
-                )
-
-                # Не пытаемся здесь делать await task:
-                # если библиотека зависла внутри браузера,
-                # это снова может зависнуть.
-
-                if not login_task.done():
-
-                    login_task.cancel()
-
-                raise
 
         except asyncio.CancelledError:
 
@@ -840,9 +1114,9 @@ class PocketMarket:
 
             self.last_error = error_text
 
-            # ------------------------------------------------
+            # =================================================
             # CAPTCHA
-            # ------------------------------------------------
+            # =================================================
 
             if (
                 "captcha" in error_lower
@@ -850,8 +1124,7 @@ class PocketMarket:
             ):
 
                 logger.error(
-                    "[AUTO LOGIN] ❌ "
-                    "CAPTCHA/RECAPTCHA."
+                    "[AUTO LOGIN] ❌ CAPTCHA/RECAPTCHA."
                 )
 
                 raise RuntimeError(
@@ -861,9 +1134,28 @@ class PocketMarket:
                     f"Детали: {error_text}"
                 ) from exc
 
-            # ------------------------------------------------
+            # =================================================
+            # ETXTBSY
+            # =================================================
+
+            if (
+                "etxtbsy" in error_lower
+                or "text file busy" in error_lower
+            ):
+
+                logger.error(
+                    "[AUTO LOGIN] ❌ Chromium ETXTBSY."
+                )
+
+                raise RuntimeError(
+                    "Render не смог запустить Chromium "
+                    "из Playwright cache (ETXTBSY). "
+                    "Попробуйте redeploy с очисткой cache."
+                ) from exc
+
+            # =================================================
             # BROWSER
-            # ------------------------------------------------
+            # =================================================
 
             browser_errors = (
                 "chromium distribution",
@@ -894,9 +1186,9 @@ class PocketMarket:
                     f"Детали: {error_text}"
                 ) from exc
 
-            # ------------------------------------------------
+            # =================================================
             # NETWORK
-            # ------------------------------------------------
+            # =================================================
 
             network_errors = (
                 "firewall",
@@ -940,9 +1232,9 @@ class PocketMarket:
                 f"{error_text}"
             ) from exc
 
-        # ----------------------------------------------------
+        # ====================================================
         # SSID VALIDATION
-        # ----------------------------------------------------
+        # ====================================================
 
         if not ssid:
 
@@ -985,12 +1277,6 @@ class PocketMarket:
         self,
         ssid: str,
     ) -> Any:
-        """
-        Создаёт PocketOptionAsync вне event loop.
-
-        Конструктор библиотеки может автоматически
-        устанавливать WebSocket-соединение.
-        """
 
         try:
 
@@ -1071,13 +1357,6 @@ class PocketMarket:
         timeout: int,
         method_name: str = "method",
     ) -> Any:
-        """
-        Безопасный вызов метода библиотеки.
-
-        Async → выполняется напрямую.
-
-        Sync → выполняется через thread.
-        """
 
         try:
 
@@ -1137,14 +1416,6 @@ class PocketMarket:
     # ========================================================
 
     async def connect(self) -> bool:
-        """
-        Подключение к Pocket Option.
-
-        Приоритет:
-
-        1. PO_SSID
-        2. PO_EMAIL + PO_PASSWORD
-        """
 
         async with self.lock:
 
@@ -1165,7 +1436,7 @@ class PocketMarket:
             ssid = ""
 
             # =================================================
-            # STEP 1 — SSID
+            # STEP 1
             # =================================================
 
             if config.po_ssid:
@@ -1201,7 +1472,7 @@ class PocketMarket:
 
                     ssid = await asyncio.wait_for(
                         self.auto_login(),
-                        timeout=AUTO_LOGIN_TIMEOUT + 10,
+                        timeout=AUTO_LOGIN_TIMEOUT + 15,
                     )
 
                 except asyncio.CancelledError:
@@ -1232,7 +1503,7 @@ class PocketMarket:
                     ) from exc
 
             # =================================================
-            # STEP 2 — SSID
+            # STEP 2
             # =================================================
 
             if not ssid:
@@ -1252,7 +1523,7 @@ class PocketMarket:
             )
 
             # =================================================
-            # STEP 3 — CLIENT
+            # STEP 3
             # =================================================
 
             logger.info(
@@ -1290,7 +1561,7 @@ class PocketMarket:
             )
 
             # =================================================
-            # STEP 4 — WEBSOCKET
+            # STEP 4
             # =================================================
 
             logger.info(
@@ -1301,18 +1572,12 @@ class PocketMarket:
                 WEBSOCKET_INIT_DELAY,
             )
 
-            try:
-
-                await asyncio.sleep(
-                    WEBSOCKET_INIT_DELAY
-                )
-
-            except asyncio.CancelledError:
-
-                raise
+            await asyncio.sleep(
+                WEBSOCKET_INIT_DELAY
+            )
 
             # =================================================
-            # STEP 5 — HEALTH CHECK
+            # STEP 5
             # =================================================
 
             logger.info(
@@ -1361,11 +1626,6 @@ class PocketMarket:
                         "не прошёл: %s",
                         health_exc,
                     )
-
-                    # Не уничтожаем клиент.
-                    #
-                    # В некоторых версиях библиотеки
-                    # balance может работать иначе.
 
             else:
 
@@ -1651,10 +1911,6 @@ class PocketMarket:
 
             return []
 
-        # ----------------------------------------------------
-        # Dict wrapper
-        # ----------------------------------------------------
-
         if isinstance(
             raw,
             dict,
@@ -1684,10 +1940,6 @@ class PocketMarket:
                 else []
             )
 
-        # ----------------------------------------------------
-        # Object wrapper
-        # ----------------------------------------------------
-
         for attr in (
             "data",
             "candles",
@@ -1714,10 +1966,6 @@ class PocketMarket:
                     value
                 )
 
-        # ----------------------------------------------------
-        # List / tuple
-        # ----------------------------------------------------
-
         if isinstance(
             raw,
             (list, tuple),
@@ -1738,10 +1986,6 @@ class PocketMarket:
                     )
 
             return result
-
-        # ----------------------------------------------------
-        # Single candle
-        # ----------------------------------------------------
 
         candle = cls._parse_candle(
             raw
@@ -2104,8 +2348,6 @@ class PocketMarket:
 
             if not self.is_connected:
 
-                # auto_login может занимать до 120 сек.
-                # Поэтому старый timeout 60 сек был неправильным.
                 market_connect_timeout = (
                     AUTO_LOGIN_TIMEOUT
                     + CONNECT_TIMEOUT
@@ -2115,7 +2357,7 @@ class PocketMarket:
 
                 logger.info(
                     "[MARKET TEST] "
-                    "Ожидаемый connect timeout: "
+                    "Expected connect timeout: "
                     "%s сек.",
                     market_connect_timeout,
                 )
