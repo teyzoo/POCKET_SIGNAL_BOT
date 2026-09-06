@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
+import importlib
 import logging
 import multiprocessing as mp
 import os
@@ -128,11 +128,15 @@ def _get_playwright_sources() -> list[str]:
         os.getenv(
             "POCKET_PLAYWRIGHT_SOURCE_PATH"
         ),
+
         os.getenv(
             "PLAYWRIGHT_BROWSERS_PATH"
         ),
+
         "/opt/render/project/src/.cache/ms-playwright",
+
         "/opt/render/.cache/ms-playwright",
+
         "./.cache/ms-playwright",
     ]
 
@@ -192,7 +196,7 @@ async def prepare_playwright_environment() -> tuple[
         return True, executable
 
     # --------------------------------------------------------
-    # 2. Render cache
+    # 2. Render cache / configured path
     # --------------------------------------------------------
 
     for source in _get_playwright_sources():
@@ -231,7 +235,8 @@ async def prepare_playwright_environment() -> tuple[
         except Exception as exc:
 
             logger.warning(
-                "[PLAYWRIGHT] Не удалось скопировать browser: %s",
+                "[PLAYWRIGHT] "
+                "Не удалось скопировать browser: %s",
                 exc,
             )
 
@@ -251,7 +256,8 @@ async def prepare_playwright_environment() -> tuple[
             return True, executable
 
     logger.error(
-        "[PLAYWRIGHT] Chromium не найден в Render runtime/cache."
+        "[PLAYWRIGHT] "
+        "Chromium не найден в Render runtime/cache."
     )
 
     return False, None
@@ -274,6 +280,7 @@ def _pocket_login_worker(
     try:
 
         if browser_executable:
+
             _make_executable(
                 browser_executable
             )
@@ -283,26 +290,25 @@ def _pocket_login_worker(
             browser_executable,
         )
 
-        import BinaryOptionsToolsV2.pocketoption.tools.login as login_module
+        # ====================================================
+        # IMPORTANT FIX
+        #
+        # Не используем:
+        #
+        # import ...tools.login as login_module
+        #
+        # В BinaryOptionsToolsV2 эта конструкция может вернуть
+        # функцию login вместо самого модуля.
+        #
+        # Поэтому используем importlib.import_module().
+        # ====================================================
+
+        login_module = importlib.import_module(
+            "BinaryOptionsToolsV2.pocketoption.tools.login"
+        )
 
         # ====================================================
-        # IMPORTANT
-        #
-        # BinaryOptionsToolsV2 normally tries:
-        #
-        # Firefox
-        # Chromium
-        # system Chrome
-        #
-        # The last backend tries:
-        #
-        # /opt/google/chrome/chrome
-        #
-        # Render does not have this Chrome.
-        #
-        # We therefore replace the browser configuration and
-        # explicitly give Playwright the Chromium executable
-        # that actually exists in Render.
+        # Render browser configuration
         # ====================================================
 
         if browser_executable:
@@ -353,6 +359,8 @@ def _pocket_login_worker(
                             "--disable-blink-features=AutomationControlled",
                             "--no-sandbox",
                             "--disable-dev-shm-usage",
+                            "--disable-gpu",
+                            "--disable-software-rasterizer",
                             "--lang=en-US,en",
                         ],
                     },
@@ -382,6 +390,11 @@ def _pocket_login_worker(
 
         if ssid:
 
+            logger.info(
+                "[AUTO LOGIN WORKER] "
+                "Login успешно получил SSID."
+            )
+
             result_queue.put(
                 {
                     "ok": True,
@@ -390,6 +403,11 @@ def _pocket_login_worker(
             )
 
         else:
+
+            logger.error(
+                "[AUTO LOGIN WORKER] "
+                "login() вернул пустой SSID."
+            )
 
             result_queue.put(
                 {
@@ -556,9 +574,11 @@ class PocketMarket:
                         "SSID успешно получен."
                     )
 
-                    return str(
+                    self.ssid = str(
                         result["ssid"]
                     )
+
+                    return self.ssid
 
                 logger.error(
                     "[AUTO LOGIN] Login error: %s",
@@ -609,6 +629,11 @@ class PocketMarket:
                 except Exception:
                     pass
 
+            try:
+                result_queue.close()
+            except Exception:
+                pass
+
     # ========================================================
     # CREATE CLIENT
     # ========================================================
@@ -653,6 +678,42 @@ class PocketMarket:
             return None
 
     # ========================================================
+    # BALANCE TEST
+    # ========================================================
+
+    async def _check_connection(
+        self,
+        client: Any,
+    ) -> bool:
+
+        try:
+
+            logger.info(
+                "[MARKET] Проверяю connection через balance()..."
+            )
+
+            balance = await asyncio.wait_for(
+                client.balance(),
+                timeout=BALANCE_TIMEOUT,
+            )
+
+            logger.info(
+                "[MARKET] Balance check OK: %s",
+                balance,
+            )
+
+            return True
+
+        except Exception as exc:
+
+            logger.error(
+                "[MARKET] Balance check failed: %s",
+                exc,
+            )
+
+            return False
+
+    # ========================================================
     # CONNECT
     # ========================================================
 
@@ -674,10 +735,12 @@ class PocketMarket:
 
                 return True
 
+            self.connected = False
+
             self.demo = demo
 
             # ------------------------------------------------
-            # SSID argument
+            # Explicit SSID
             # ------------------------------------------------
 
             if ssid:
@@ -685,7 +748,7 @@ class PocketMarket:
                 self.ssid = ssid.strip()
 
             # ------------------------------------------------
-            # SSID ENV
+            # ENV SSID
             # ------------------------------------------------
 
             if not self.ssid:
@@ -728,11 +791,15 @@ class PocketMarket:
                 if not email or not password:
 
                     logger.error(
-                        "[MARKET] Нет PO_SSID "
+                        "[MARKET] "
+                        "Нет PO_SSID "
                         "и нет PO_EMAIL/PO_PASSWORD."
                     )
 
                     return False
+
+                self.email = email
+                self.password = password
 
                 logger.info(
                     "[MARKET] STEP 1/5: "
@@ -763,6 +830,8 @@ class PocketMarket:
                         "[MARKET] "
                         "Общий timeout авторизации."
                     )
+
+                    self.ssid = None
 
                     return False
 
@@ -808,145 +877,80 @@ class PocketMarket:
 
             if self.client is None:
 
+                logger.error(
+                    "[MARKET] "
+                    "PocketOptionAsync не создан."
+                )
+
                 return False
 
             # ------------------------------------------------
-            # BALANCE
+            # CONNECTION CHECK
             # ------------------------------------------------
 
             logger.info(
                 "[MARKET] STEP 3/5: "
-                "Проверяю соединение balance()."
+                "Проверяю подключение."
             )
 
-            try:
-
-                balance_method = getattr(
-                    self.client,
-                    "balance",
-                    None,
+            connection_ok = (
+                await self._check_connection(
+                    self.client
                 )
+            )
 
-                if balance_method is not None:
-
-                    result = balance_method()
-
-                    if inspect.isawaitable(
-                        result
-                    ):
-
-                        result = (
-                            await asyncio.wait_for(
-                                result,
-                                timeout=BALANCE_TIMEOUT,
-                            )
-                        )
-
-                    logger.info(
-                        "[MARKET] "
-                        "Balance check OK: %s",
-                        result,
-                    )
-
-            except asyncio.TimeoutError:
+            if not connection_ok:
 
                 logger.error(
                     "[MARKET] "
-                    "Balance timeout."
+                    "Connection check failed."
                 )
 
-                await self.close()
+                await self.disconnect()
 
                 return False
 
-            except Exception as exc:
-
-                logger.error(
-                    "[MARKET] "
-                    "Balance check failed: %s",
-                    exc,
-                )
-
-                await self.close()
-
-                return False
+            # ------------------------------------------------
+            # CONNECTED
+            # ------------------------------------------------
 
             self.connected = True
 
             logger.info(
                 "[MARKET] STEP 4/5: "
-                "Соединение установлено."
+                "Pocket Option connection established."
             )
 
             logger.info(
                 "[MARKET] STEP 5/5: "
-                "Market готов."
+                "Market is READY."
             )
 
             return True
 
     # ========================================================
-    # CANDLES
+    # CONNECTION STATE
     # ========================================================
 
-    async def candles(
-        self,
-        asset: str,
-        minutes: int = 1,
-        limit: int = 300,
-        **kwargs: Any,
-    ) -> list[Candle]:
+    def is_connected(self) -> bool:
 
-        period = int(
-            kwargs.get(
-                "period",
-                int(minutes) * 60,
-            )
+        return (
+            self.connected
+            and self.client is not None
         )
 
-        count = int(
-            kwargs.get(
-                "count",
-                limit,
-            )
-        )
-
-        return await self.get_candle_data(
-            asset,
-            period=period,
-            count=count,
-            offset=kwargs.get(
-                "offset"
-            ),
-        )
+    # ========================================================
+    # CANDLES
+    # ========================================================
 
     async def get_candles(
         self,
         asset: str,
         period: int = 60,
-        count: int = 300,
-        offset: int | None = None,
-    ) -> list[Candle]:
+        count: int = 100,
+    ) -> list[Any]:
 
-        return await self.get_candle_data(
-            asset,
-            period=period,
-            count=count,
-            offset=offset,
-        )
-
-    async def get_candle_data(
-        self,
-        asset: str,
-        period: int = 60,
-        count: int = 300,
-        offset: int | None = None,
-    ) -> list[Candle]:
-
-        if (
-            self.client is None
-            or not self.connected
-        ):
+        if not self.is_connected():
 
             logger.warning(
                 "[MARKET] "
@@ -955,27 +959,48 @@ class PocketMarket:
 
             return []
 
-        if not asset:
-
-            return []
-
-        period = max(
-            1,
-            int(period),
-        )
-
-        count = max(
-            1,
-            int(count),
-        )
-
-        if offset is None:
-
-            offset = period * count
-
         async with self._candles_lock:
 
             try:
+
+                logger.debug(
+                    "[MARKET] "
+                    "Request candles: %s "
+                    "period=%s count=%s",
+                    asset,
+                    period,
+                    count,
+                )
+
+                method = getattr(
+                    self.client,
+                    "get_candles_live",
+                    None,
+                )
+
+                if method is not None:
+
+                    result = await asyncio.wait_for(
+                        method(
+                            asset,
+                            period,
+                        ),
+                        timeout=CANDLE_REQUEST_TIMEOUT,
+                    )
+
+                    candles = (
+                        self._normalize_candles(
+                            result,
+                            count,
+                        )
+                    )
+
+                    if candles:
+                        return candles
+
+                # ------------------------------------------------
+                # Fallback
+                # ------------------------------------------------
 
                 method = getattr(
                     self.client,
@@ -986,108 +1011,31 @@ class PocketMarket:
                 if method is None:
 
                     logger.error(
-                        "[CANDLES] "
-                        "У клиента нет get_candles()."
+                        "[MARKET] "
+                        "Client has no candle method."
                     )
 
                     return []
 
-                try:
-
-                    result = method(
+                result = await asyncio.wait_for(
+                    method(
                         asset,
                         period,
-                        offset,
-                    )
-
-                except TypeError:
-
-                    try:
-
-                        result = method(
-                            asset=asset,
-                            period=period,
-                            offset=offset,
-                        )
-
-                    except TypeError:
-
-                        result = method(
-                            asset,
-                            period,
-                        )
-
-                if inspect.isawaitable(
-                    result
-                ):
-
-                    result = (
-                        await asyncio.wait_for(
-                            result,
-                            timeout=CANDLE_REQUEST_TIMEOUT,
-                        )
-                    )
-
-                candles = (
-                    self._normalize_candles(
-                        result
-                    )
+                        count,
+                    ),
+                    timeout=CANDLE_REQUEST_TIMEOUT,
                 )
 
-                candles.sort(
-                    key=lambda x: x.timestamp
+                return self._normalize_candles(
+                    result,
+                    count,
                 )
-
-                unique = {
-                    candle.timestamp:
-                        candle
-                    for candle in candles
-                }
-
-                candles = list(
-                    unique.values()
-                )
-
-                candles.sort(
-                    key=lambda x: x.timestamp
-                )
-
-                now = int(
-                    datetime.now(
-                        timezone.utc
-                    ).timestamp()
-                )
-
-                current_bucket = (
-                    now // period
-                ) * period
-
-                candles = [
-                    candle
-                    for candle in candles
-                    if candle.timestamp
-                    < current_bucket
-                ]
-
-                if len(candles) > count:
-
-                    candles = candles[
-                        -count:
-                    ]
-
-                logger.info(
-                    "[CANDLES] %s: "
-                    "получено %s свечей.",
-                    asset,
-                    len(candles),
-                )
-
-                return candles
 
             except asyncio.TimeoutError:
 
                 logger.error(
-                    "[CANDLES] Timeout %s.",
+                    "[MARKET] "
+                    "Candle request timeout: %s",
                     asset,
                 )
 
@@ -1096,345 +1044,318 @@ class PocketMarket:
             except Exception as exc:
 
                 logger.exception(
-                    "[CANDLES] "
-                    "Ошибка получения %s: %s",
+                    "[MARKET] "
+                    "Candle request failed for %s: %s",
                     asset,
                     exc,
                 )
 
+                # Очень важно:
+                # не считаем обычную ошибку свечей
+                # полноценным подключением.
+
+                if self.client is None:
+                    self.connected = False
+
                 return []
 
     # ========================================================
-    # NORMALIZE
+    # CANDLE DATA ALIAS
+    # ========================================================
+
+    async def get_candle_data(
+        self,
+        asset: str,
+        period: int = 60,
+        count: int = 100,
+    ) -> list[Any]:
+
+        return await self.get_candles(
+            asset=asset,
+            period=period,
+            count=count,
+        )
+
+    # ========================================================
+    # CANDLE NORMALIZATION
     # ========================================================
 
     def _normalize_candles(
         self,
-        raw: Any,
+        data: Any,
+        count: int,
     ) -> list[Candle]:
 
-        if raw is None:
-
+        if data is None:
             return []
 
-        if isinstance(raw, dict):
+        if isinstance(data, dict):
 
             for key in (
                 "data",
                 "candles",
                 "result",
-                "history",
+                "items",
             ):
 
-                if key in raw:
+                if key in data:
 
-                    raw = raw[key]
+                    data = data[key]
 
                     break
 
-        if (
-            hasattr(raw, "to_dict")
-            and hasattr(raw, "columns")
-        ):
-
-            try:
-
-                raw = raw.to_dict(
-                    orient="records"
-                )
-
-            except Exception:
-                pass
-
         if not isinstance(
-            raw,
+            data,
             (list, tuple),
         ):
 
             return []
 
-        result: list[Candle] = []
+        normalized: list[Candle] = []
 
-        for item in raw:
+        for item in data:
 
             try:
 
-                if isinstance(
+                if isinstance(item, dict):
+
+                    timestamp = item.get(
+                        "timestamp",
+                        item.get(
+                            "time",
+                            item.get(
+                                "from",
+                                item.get(
+                                    "at",
+                                    0,
+                                ),
+                            ),
+                        ),
+                    )
+
+                    open_price = item.get(
+                        "open",
+                        item.get("o"),
+                    )
+
+                    high_price = item.get(
+                        "high",
+                        item.get("h"),
+                    )
+
+                    low_price = item.get(
+                        "low",
+                        item.get("l"),
+                    )
+
+                    close_price = item.get(
+                        "close",
+                        item.get("c"),
+                    )
+
+                    volume = item.get(
+                        "volume",
+                        item.get(
+                            "v",
+                            0,
+                        ),
+                    )
+
+                elif isinstance(
                     item,
-                    dict,
+                    (list, tuple),
                 ):
 
-                    timestamp = (
-                        item.get("timestamp")
-                        or item.get("time")
-                        or item.get("from")
-                        or item.get("at")
-                    )
+                    if len(item) < 5:
+                        continue
 
-                    open_price = (
-                        item.get("open")
-                        if item.get("open")
-                        is not None
-                        else item.get("o")
-                    )
-
-                    high_price = (
-                        item.get("high")
-                        if item.get("high")
-                        is not None
-                        else item.get("h")
-                    )
-
-                    low_price = (
-                        item.get("low")
-                        if item.get("low")
-                        is not None
-                        else item.get("l")
-                    )
-
-                    close_price = (
-                        item.get("close")
-                        if item.get("close")
-                        is not None
-                        else item.get("c")
-                    )
+                    timestamp = item[0]
+                    open_price = item[1]
+                    high_price = item[2]
+                    low_price = item[3]
+                    close_price = item[4]
 
                     volume = (
-                        item.get("volume")
-                        if item.get("volume")
-                        is not None
-                        else item.get("v", 0)
+                        item[5]
+                        if len(item) > 5
+                        else 0
                     )
 
                 else:
 
-                    timestamp = (
+                    timestamp = getattr(
+                        item,
+                        "timestamp",
                         getattr(
-                            item,
-                            "timestamp",
-                            None,
-                        )
-                        or getattr(
                             item,
                             "time",
-                            None,
-                        )
-                        or getattr(
-                            item,
-                            "from",
-                            None,
-                        )
+                            0,
+                        ),
                     )
 
-                    open_price = (
-                        getattr(
-                            item,
-                            "open",
-                            None,
-                        )
-                        or getattr(
-                            item,
-                            "o",
-                            None,
-                        )
+                    open_price = getattr(
+                        item,
+                        "open",
+                        None,
                     )
 
-                    high_price = (
-                        getattr(
-                            item,
-                            "high",
-                            None,
-                        )
-                        or getattr(
-                            item,
-                            "h",
-                            None,
-                        )
+                    high_price = getattr(
+                        item,
+                        "high",
+                        None,
                     )
 
-                    low_price = (
-                        getattr(
-                            item,
-                            "low",
-                            None,
-                        )
-                        or getattr(
-                            item,
-                            "l",
-                            None,
-                        )
+                    low_price = getattr(
+                        item,
+                        "low",
+                        None,
                     )
 
-                    close_price = (
-                        getattr(
-                            item,
-                            "close",
-                            None,
-                        )
-                        or getattr(
-                            item,
-                            "c",
-                            None,
-                        )
+                    close_price = getattr(
+                        item,
+                        "close",
+                        None,
                     )
 
-                    volume = (
-                        getattr(
-                            item,
-                            "volume",
-                            None,
-                        )
-                        or getattr(
-                            item,
-                            "v",
-                            None,
-                        )
-                        or 0
+                    volume = getattr(
+                        item,
+                        "volume",
+                        0,
                     )
 
                 if timestamp is None:
                     continue
 
-                if open_price is None:
-                    continue
-
-                if high_price is None:
-                    continue
-
-                if low_price is None:
-                    continue
-
-                if close_price is None:
-                    continue
-
-                timestamp = float(
-                    timestamp
+                timestamp = int(
+                    float(timestamp)
                 )
 
+                # milliseconds → seconds
                 if timestamp > 10_000_000_000:
+                    timestamp //= 1000
 
-                    timestamp /= 1000
+                candle = Candle(
+                    timestamp=timestamp,
+                    open=float(open_price),
+                    high=float(high_price),
+                    low=float(low_price),
+                    close=float(close_price),
+                    volume=float(volume or 0),
+                )
 
-                result.append(
-                    Candle(
-                        timestamp=int(
-                            timestamp
-                        ),
-                        open=float(
-                            open_price
-                        ),
-                        high=float(
-                            high_price
-                        ),
-                        low=float(
-                            low_price
-                        ),
-                        close=float(
-                            close_price
-                        ),
-                        volume=float(
-                            volume or 0
-                        ),
-                    )
+                normalized.append(
+                    candle
                 )
 
             except Exception:
+
                 continue
 
-        return result
+        normalized.sort(
+            key=lambda x: x.timestamp
+        )
+
+        if count > 0:
+
+            normalized = normalized[-count:]
+
+        return normalized
 
     # ========================================================
     # FRESHNESS
     # ========================================================
 
-    def validate_freshness(
+    def candles_are_fresh(
         self,
-        candles: list[Candle],
-        period: int = 60,
-        max_delay: int | None = None,
+        candles: list[Any],
+        max_age_seconds: int,
     ) -> bool:
 
         if not candles:
-
             return False
 
-        if max_delay is None:
+        try:
 
-            max_delay = period * 3
+            last = candles[-1]
 
-        latest = candles[-1]
-
-        now = int(
-            datetime.now(
-                timezone.utc
-            ).timestamp()
-        )
-
-        age = (
-            now
-            - latest.timestamp
-        )
-
-        if age < 0:
-
-            return False
-
-        if age > max_delay:
-
-            logger.warning(
-                "[CANDLES] "
-                "Данные устарели: "
-                "age=%ss max=%ss",
-                age,
-                max_delay,
+            timestamp = getattr(
+                last,
+                "timestamp",
+                0,
             )
 
+            if not timestamp:
+                return False
+
+            now = int(
+                time.time()
+            )
+
+            age = now - int(
+                timestamp
+            )
+
+            return (
+                age >= -10
+                and age <= max_age_seconds
+            )
+
+        except Exception:
+
             return False
 
-        return True
-
     # ========================================================
-    # TEST
+    # MARKET TEST
     # ========================================================
 
     async def test_market(
         self,
-        asset: str = "EURUSD",
+        asset: str = "EURUSD_otc",
+        period: int = 60,
+        count: int = 10,
     ) -> bool:
 
-        if not self.connected:
+        if not self.is_connected():
 
             return False
 
-        candles = await self.candles(
-            asset,
-            minutes=1,
-            limit=20,
+        candles = await self.get_candles(
+            asset=asset,
+            period=period,
+            count=count,
         )
 
         if not candles:
 
+            logger.error(
+                "[MARKET] "
+                "Market test failed: empty candles."
+            )
+
             return False
 
-        return self.validate_freshness(
-            candles,
-            period=60,
+        logger.info(
+            "[MARKET] "
+            "Market test OK: %s candles for %s",
+            len(candles),
+            asset,
         )
 
+        return True
+
     # ========================================================
-    # CLOSE
+    # DISCONNECT
     # ========================================================
 
-    async def close(self) -> None:
+    async def disconnect(self) -> None:
+
+        self.connected = False
 
         client = self.client
 
         self.client = None
 
-        self.connected = False
-
         if client is None:
-
             return
 
         try:
@@ -1445,67 +1366,43 @@ class PocketMarket:
                 None,
             )
 
-            if close_method is None:
+            if close_method is not None:
 
-                close_method = getattr(
-                    client,
-                    "disconnect",
-                    None,
-                )
+                result = close_method()
 
-            if close_method is None:
+                if inspect.isawaitable(
+                    result
+                ):
 
-                logger.info(
-                    "[MARKET] "
-                    "У клиента нет close/disconnect."
-                )
-
-                return
-
-            result = close_method()
-
-            if inspect.isawaitable(
-                result
-            ):
-
-                await asyncio.wait_for(
-                    result,
-                    timeout=CLIENT_CLOSE_TIMEOUT,
-                )
-
-            logger.info(
-                "[MARKET] Client закрыт."
-            )
-
-        except asyncio.TimeoutError:
-
-            logger.warning(
-                "[MARKET] "
-                "Client close timeout."
-            )
+                    await asyncio.wait_for(
+                        result,
+                        timeout=CLIENT_CLOSE_TIMEOUT,
+                    )
 
         except Exception as exc:
 
             logger.warning(
                 "[MARKET] "
-                "Ошибка закрытия client: %s",
+                "Client close error: %s",
                 exc,
             )
 
-    async def disconnect(self) -> None:
+        logger.info(
+            "[MARKET] "
+            "Pocket Option disconnected."
+        )
 
-        await self.close()
+    # ========================================================
+    # CLOSE ALIAS
+    # ========================================================
+
+    async def close(self) -> None:
+
+        await self.disconnect()
 
 
 # ============================================================
-# GLOBAL INSTANCE
+# GLOBAL MARKET INSTANCE
 # ============================================================
 
 market = PocketMarket()
-
-
-__all__ = [
-    "Candle",
-    "PocketMarket",
-    "market",
-]
