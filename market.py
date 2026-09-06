@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from BinaryOptionsToolsV2.pocketoption.api import PocketOptionAsync
+# IMPORTANT:
+# Current BinaryOptionsToolsV2 exports PocketOptionAsync from
+# BinaryOptionsToolsV2.pocketoption
+from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync
 
 import config
 
@@ -27,7 +30,11 @@ BALANCE_TIMEOUT = 30
 CANDLE_REQUEST_TIMEOUT = 30
 CLIENT_CLOSE_TIMEOUT = 10
 PLAYWRIGHT_PREPARE_TIMEOUT = 60
+WEBSOCKET_INIT_DELAY = 5
 
+
+# Render Free has limited RAM.
+# Do NOT use multiprocessing for login.
 RUNTIME_PLAYWRIGHT_PATH = "/tmp/pocket-option-ms-playwright"
 
 
@@ -68,7 +75,8 @@ def _find_browser_executable(
     base_paths: list[Path],
 ) -> Optional[str]:
     """
-    Ищет Chromium/Chrome внутри Playwright directories.
+    Ищет установленный Chromium/Chrome
+    внутри Playwright cache.
     """
 
     executable_names = (
@@ -84,21 +92,15 @@ def _find_browser_executable(
 
         try:
             for name in executable_names:
-                matches = list(
-                    base.rglob(name)
-                )
-
-                for path in matches:
-                    if (
-                        path.is_file()
-                        and os.access(
-                            path,
-                            os.X_OK,
-                        )
-                    ):
-                        return str(
-                            path.resolve()
-                        )
+                for path in base.rglob(name):
+                    try:
+                        if (
+                            path.is_file()
+                            and os.access(path, os.X_OK)
+                        ):
+                            return str(path.resolve())
+                    except Exception:
+                        continue
 
         except Exception:
             logger.exception(
@@ -111,10 +113,7 @@ def _find_browser_executable(
 
 def _get_playwright_sources() -> list[Path]:
     """
-    Источники Playwright browser cache.
-
-    На Render основной путь:
-    /opt/render/project/src/.cache/ms-playwright
+    Возвращает возможные директории Playwright.
     """
 
     result: list[Path] = []
@@ -124,18 +123,14 @@ def _get_playwright_sources() -> list[Path]:
     )
 
     if custom:
-        result.append(
-            Path(custom)
-        )
+        result.append(Path(custom))
 
     env_path = os.getenv(
         "PLAYWRIGHT_BROWSERS_PATH"
     )
 
     if env_path:
-        result.append(
-            Path(env_path)
-        )
+        result.append(Path(env_path))
 
     result.extend(
         [
@@ -155,32 +150,34 @@ def _get_playwright_sources() -> list[Path]:
     seen: set[str] = set()
 
     for path in result:
-        key = str(
-            path.expanduser().resolve()
-        )
+        try:
+            key = str(
+                path.expanduser().resolve()
+            )
+        except Exception:
+            key = str(path)
 
         if key in seen:
             continue
 
         seen.add(key)
-        unique.append(
-            path
-        )
+        unique.append(path)
 
     return unique
 
 
 # ============================================================
-# PLAYWRIGHT PREPARATION
+# PLAYWRIGHT
 # ============================================================
 
 def prepare_playwright_environment() -> Optional[str]:
     """
-    Находит установленный Render Chromium и при необходимости
-    копирует его в /tmp.
+    Находит Chromium, установленный Render.
 
-    Важно:
-    /tmp используется только как runtime-копия.
+    Если runtime-копия уже существует —
+    используем её.
+
+    Иначе ищем браузер в Playwright cache.
     """
 
     runtime = Path(
@@ -198,7 +195,7 @@ def prepare_playwright_environment() -> Optional[str]:
     )
 
     # --------------------------------------------------------
-    # FIRST: RUNTIME
+    # Runtime browser
     # --------------------------------------------------------
 
     browser = _find_browser_executable(
@@ -214,7 +211,7 @@ def prepare_playwright_environment() -> Optional[str]:
         return browser
 
     # --------------------------------------------------------
-    # SOURCE
+    # Search sources
     # --------------------------------------------------------
 
     sources = _get_playwright_sources()
@@ -245,7 +242,7 @@ def prepare_playwright_environment() -> Optional[str]:
         )
 
         # ----------------------------------------------------
-        # COPY SOURCE TO RUNTIME
+        # Copy to runtime
         # ----------------------------------------------------
 
         try:
@@ -284,11 +281,10 @@ def prepare_playwright_environment() -> Optional[str]:
 
         except Exception:
             logger.exception(
-                "[PLAYWRIGHT] Не удалось скопировать browser cache."
+                "[PLAYWRIGHT] Ошибка копирования Chromium."
             )
 
-            # Если копирование не получилось, всё равно
-            # возвращаем исходный executable.
+            # Используем оригинальный executable.
             return browser
 
     logger.error(
@@ -308,10 +304,14 @@ def _pocket_login_sync(
     browser_executable: str,
 ) -> Optional[str]:
     """
-    Синхронный login в отдельном thread.
+    Синхронный login.
 
-    multiprocessing здесь намеренно НЕ используется.
-    Это сильно уменьшает расход RAM на Render Free.
+    ВАЖНО:
+    multiprocessing здесь НЕ используется.
+
+    Это необходимо для Render Free, потому что
+    отдельный Python process повторно загружает
+    тяжёлые зависимости и резко увеличивает RAM.
     """
 
     logger.info(
@@ -330,15 +330,16 @@ def _pocket_login_sync(
         )
         return None
 
+    original_browser_configs = getattr(
+        login_module,
+        "_browser_configs",
+        None,
+    )
+
     try:
-        original_browser_configs = getattr(
-            login_module,
-            "_browser_configs",
-            None,
-        )
 
         # ----------------------------------------------------
-        # PLAYWRIGHT CONFIG
+        # Browser configuration
         # ----------------------------------------------------
 
         def forced_browser_configs(
@@ -351,6 +352,8 @@ def _pocket_login_sync(
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--disable-software-rasterizer",
+
+                # RAM optimization
                 "--disable-background-networking",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
@@ -360,14 +363,20 @@ def _pocket_login_sync(
                 "--disable-extensions",
                 "--disable-features=Translate,BackForwardCache",
                 "--disable-hang-monitor",
-                "--disable-ipc-flooding-protection",
                 "--disable-popup-blocking",
                 "--disable-prompt-on-repost",
                 "--disable-renderer-backgrounding",
                 "--disable-sync",
+
                 "--metrics-recording-only",
                 "--no-first-run",
                 "--no-zygote",
+
+                # Keep renderer count low.
+                "--renderer-process-limit=1",
+
+                # Reduce Chromium memory usage.
+                "--js-flags=--max-old-space-size=128",
             ]
 
             yield (
@@ -384,9 +393,9 @@ def _pocket_login_sync(
                 forced_browser_configs
             )
 
-        logger.info(
-            "[AUTO LOGIN WORKER] Запускаю login() с Render Chromium."
-        )
+        # ----------------------------------------------------
+        # Find login()
+        # ----------------------------------------------------
 
         login_function = getattr(
             login_module,
@@ -400,8 +409,12 @@ def _pocket_login_sync(
             )
             return None
 
+        logger.info(
+            "[AUTO LOGIN WORKER] Запускаю login()..."
+        )
+
         # ----------------------------------------------------
-        # CALL LIBRARY LOGIN
+        # Login
         # ----------------------------------------------------
 
         result = login_function(
@@ -412,22 +425,16 @@ def _pocket_login_sync(
         )
 
         # ----------------------------------------------------
-        # RESULT NORMALIZATION
+        # Normalize result
         # ----------------------------------------------------
 
-        if isinstance(
-            result,
-            str,
-        ):
+        if isinstance(result, str):
             ssid = result.strip()
 
             if ssid:
                 return ssid
 
-        if isinstance(
-            result,
-            dict,
-        ):
+        if isinstance(result, dict):
             for key in (
                 "ssid",
                 "session",
@@ -439,8 +446,6 @@ def _pocket_login_sync(
                 if value:
                     return str(value).strip()
 
-        # Некоторые версии библиотеки могут вернуть объект
-        # с атрибутом ssid.
         for attr in (
             "ssid",
             "session",
@@ -455,9 +460,7 @@ def _pocket_login_sync(
                 )
 
                 if value:
-                    return str(
-                        value
-                    ).strip()
+                    return str(value).strip()
 
             except Exception:
                 pass
@@ -476,15 +479,10 @@ def _pocket_login_sync(
         return None
 
     finally:
-        # ----------------------------------------------------
-        # RESTORE MODULE
-        # ----------------------------------------------------
 
+        # Restore library configuration.
         try:
-            if (
-                original_browser_configs
-                is not None
-            ):
+            if original_browser_configs is not None:
                 login_module._browser_configs = (
                     original_browser_configs
                 )
@@ -497,10 +495,14 @@ def _pocket_login_sync(
 # ============================================================
 
 class PocketMarket:
+
     def __init__(self):
         self.client: Optional[Any] = None
         self.connected: bool = False
         self.ssid: Optional[str] = None
+
+        self._login_lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
 
         logger.info(
             "[MARKET] PocketMarket создан."
@@ -511,102 +513,105 @@ class PocketMarket:
     # ========================================================
 
     async def auto_login(self) -> Optional[str]:
-        email = getattr(
-            config,
-            "PO_EMAIL",
-            None,
-        )
 
-        password = getattr(
-            config,
-            "PO_PASSWORD",
-            None,
-        )
+        async with self._login_lock:
 
-        if not email or not password:
-            logger.error(
-                "[AUTO LOGIN] PO_EMAIL/PO_PASSWORD не заданы."
-            )
-            return None
-
-        logger.info(
-            "[AUTO LOGIN] Подготавливаю Playwright..."
-        )
-
-        try:
-            browser_executable = await asyncio.wait_for(
-                asyncio.to_thread(
-                    prepare_playwright_environment
-                ),
-                timeout=PLAYWRIGHT_PREPARE_TIMEOUT,
+            email = getattr(
+                config,
+                "PO_EMAIL",
+                None,
             )
 
-        except asyncio.TimeoutError:
-            logger.error(
-                "[AUTO LOGIN] Таймаут подготовки Playwright."
-            )
-            return None
-
-        except Exception:
-            logger.exception(
-                "[AUTO LOGIN] Ошибка подготовки Playwright."
-            )
-            return None
-
-        if not browser_executable:
-            logger.error(
-                "[AUTO LOGIN] Рабочий Chromium не найден."
-            )
-            return None
-
-        logger.info(
-            "[AUTO LOGIN] Playwright готов."
-        )
-
-        logger.info(
-            "[AUTO LOGIN] Browser executable: %s",
-            browser_executable,
-        )
-
-        logger.info(
-            "[AUTO LOGIN] Запускаю login worker."
-        )
-
-        try:
-            ssid = await asyncio.wait_for(
-                asyncio.to_thread(
-                    _pocket_login_sync,
-                    email,
-                    password,
-                    browser_executable,
-                ),
-                timeout=AUTO_LOGIN_TIMEOUT,
+            password = getattr(
+                config,
+                "PO_PASSWORD",
+                None,
             )
 
-        except asyncio.TimeoutError:
-            logger.error(
-                "[AUTO LOGIN] Login timeout (%s sec).",
-                AUTO_LOGIN_TIMEOUT,
+            if not email or not password:
+                logger.error(
+                    "[AUTO LOGIN] PO_EMAIL/PO_PASSWORD не заданы."
+                )
+                return None
+
+            logger.info(
+                "[AUTO LOGIN] Подготавливаю Playwright..."
             )
-            return None
 
-        except Exception:
-            logger.exception(
-                "[AUTO LOGIN] Ошибка login worker."
+            try:
+                browser_executable = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        prepare_playwright_environment
+                    ),
+                    timeout=PLAYWRIGHT_PREPARE_TIMEOUT,
+                )
+
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[AUTO LOGIN] Таймаут подготовки Playwright."
+                )
+                return None
+
+            except Exception:
+                logger.exception(
+                    "[AUTO LOGIN] Ошибка подготовки Playwright."
+                )
+                return None
+
+            if not browser_executable:
+                logger.error(
+                    "[AUTO LOGIN] Chromium не найден."
+                )
+                return None
+
+            logger.info(
+                "[AUTO LOGIN] Playwright готов."
             )
-            return None
 
-        if not ssid:
-            logger.error(
-                "[AUTO LOGIN] Login не получил SSID."
+            logger.info(
+                "[AUTO LOGIN] Browser executable: %s",
+                browser_executable,
             )
-            return None
 
-        logger.info(
-            "[AUTO LOGIN] SSID успешно получен."
-        )
+            logger.info(
+                "[AUTO LOGIN] Запускаю login worker."
+            )
 
-        return ssid
+            try:
+                ssid = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _pocket_login_sync,
+                        email,
+                        password,
+                        browser_executable,
+                    ),
+                    timeout=AUTO_LOGIN_TIMEOUT,
+                )
+
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[AUTO LOGIN] Login timeout: %s sec",
+                    AUTO_LOGIN_TIMEOUT,
+                )
+                return None
+
+            except Exception:
+                logger.exception(
+                    "[AUTO LOGIN] Ошибка login worker."
+                )
+                return None
+
+            if not ssid:
+                logger.error(
+                    "[AUTO LOGIN] Login не получил SSID."
+                )
+                return None
+
+            logger.info(
+                "[AUTO LOGIN] SSID успешно получен."
+            )
+
+            return ssid
 
     # ========================================================
     # CREATE CLIENT
@@ -616,11 +621,14 @@ class PocketMarket:
         self,
         ssid: str,
     ) -> bool:
+
         try:
+
             logger.info(
                 "[MARKET] STEP 3/5: Создаю PocketOptionAsync client."
             )
 
+            # Current BinaryOptionsToolsV2 API.
             self.client = PocketOptionAsync(
                 ssid
             )
@@ -631,8 +639,13 @@ class PocketMarket:
                 )
                 return False
 
-            # Даём websocket время на инициализацию.
-            await asyncio.sleep(3)
+            logger.info(
+                "[MARKET] Жду инициализацию WebSocket..."
+            )
+
+            await asyncio.sleep(
+                WEBSOCKET_INIT_DELAY
+            )
 
             return True
 
@@ -642,6 +655,7 @@ class PocketMarket:
             )
 
             self.client = None
+
             return False
 
     # ========================================================
@@ -649,10 +663,12 @@ class PocketMarket:
     # ========================================================
 
     async def _check_connection(self) -> bool:
+
         if self.client is None:
             return False
 
         try:
+
             balance_method = getattr(
                 self.client,
                 "balance",
@@ -664,8 +680,8 @@ class PocketMarket:
                     "[MARKET] balance() отсутствует."
                 )
 
-                # Если библиотека не предоставляет balance,
-                # наличие client считаем достаточным.
+                # Some versions do not expose balance
+                # identically. Client itself is usable.
                 return True
 
             await asyncio.wait_for(
@@ -676,16 +692,20 @@ class PocketMarket:
             return True
 
         except asyncio.TimeoutError:
+
             logger.warning(
                 "[MARKET] balance() timeout."
             )
+
             return False
 
         except Exception as exc:
+
             logger.warning(
                 "[MARKET] Connection check failed: %s",
                 exc,
             )
+
             return False
 
     # ========================================================
@@ -693,134 +713,573 @@ class PocketMarket:
     # ========================================================
 
     async def connect(self) -> bool:
-        self.connected = False
 
-        # ----------------------------------------------------
-        # CLOSE OLD CLIENT
-        # ----------------------------------------------------
+        async with self._connect_lock:
 
-        if self.client is not None:
-            try:
-                await self.disconnect()
-            except Exception:
-                logger.exception(
-                    "[MARKET] Ошибка закрытия старого client."
-                )
+            self.connected = False
 
-        # ----------------------------------------------------
-        # SSID
-        # ----------------------------------------------------
+            logger.info(
+                "[MARKET] Подключение к Pocket Option..."
+            )
 
-        ssid = (
-            getattr(
+            # ------------------------------------------------
+            # Close old client
+            # ------------------------------------------------
+
+            if self.client is not None:
+                try:
+                    await self.disconnect()
+                except Exception:
+                    logger.exception(
+                        "[MARKET] Ошибка закрытия старого client."
+                    )
+
+            # ------------------------------------------------
+            # SSID
+            # ------------------------------------------------
+
+            ssid = getattr(
                 config,
                 "PO_SSID",
                 None,
             )
-            or os.getenv(
-                "PO_SSID"
-            )
-            or os.getenv(
-                "POCKET_OPTION_SSID"
-            )
-        )
 
-        if ssid:
-            ssid = str(
-                ssid
-            ).strip()
+            if ssid:
+                ssid = str(ssid).strip()
 
-        # ----------------------------------------------------
-        # AUTO LOGIN
-        # ----------------------------------------------------
+                logger.info(
+                    "[MARKET] STEP 1/5: Использую PO_SSID."
+                )
 
-        if not ssid:
-            logger.info(
-                "[MARKET] STEP 1/5: Запускаю автоматический login."
-            )
+            else:
 
-            auto_login_enabled = _env_bool(
-                "PO_AUTO_LOGIN",
-                bool(
-                    getattr(
-                        config,
-                        "PO_AUTO_LOGIN",
-                        True,
+                logger.info(
+                    "[MARKET] STEP 1/5: Запускаю автоматический login."
+                )
+
+                ssid = await self.auto_login()
+
+                if not ssid:
+                    logger.error(
+                        "[MARKET] Не удалось получить SSID."
                     )
-                ),
-            )
+                    return False
 
-            if not auto_login_enabled:
-                logger.error(
-                    "[MARKET] Auto login отключён."
-                )
-                return False
+            self.ssid = ssid
 
-            ssid = await self.auto_login()
+            # ------------------------------------------------
+            # Create client
+            # ------------------------------------------------
 
-            if not ssid:
-                logger.error(
-                    "[MARKET] Auto login не получил SSID."
-                )
-                return False
-
-        else:
             logger.info(
-                "[MARKET] STEP 1/5: Использую SSID из конфигурации."
+                "[MARKET] STEP 2/5: SSID получен."
             )
 
-        self.ssid = ssid
-
-        # ----------------------------------------------------
-        # CREATE CLIENT
-        # ----------------------------------------------------
-
-        logger.info(
-            "[MARKET] STEP 2/5: Устанавливаю рыночное соединение."
-        )
-
-        created = await asyncio.wait_for(
-            self._create_client(ssid),
-            timeout=CONNECT_TIMEOUT,
-        )
-
-        if not created:
-            self.connected = False
-            return False
-
-        # ----------------------------------------------------
-        # CONNECTION CHECK
-        # ----------------------------------------------------
-
-        logger.info(
-            "[MARKET] STEP 4/5: Проверяю соединение."
-        )
-
-        healthy = await self._check_connection()
-
-        if not healthy:
-            logger.error(
-                "[MARKET] Проверка соединения не пройдена."
+            client_created = await asyncio.wait_for(
+                self._create_client(ssid),
+                timeout=CONNECT_TIMEOUT,
             )
 
-            await self.disconnect()
+            if not client_created:
+                logger.error(
+                    "[MARKET] STEP 3/5 FAILED: client."
+                )
+                return False
 
-            return False
+            logger.info(
+                "[MARKET] STEP 4/5: Проверяю соединение."
+            )
 
-        # ----------------------------------------------------
-        # READY
-        # ----------------------------------------------------
+            # ------------------------------------------------
+            # Connection check
+            # ------------------------------------------------
 
-        self.connected = True
+            connected = await self._check_connection()
 
-        logger.info(
-            "[MARKET] STEP 5/5: Pocket Option market READY."
-        )
+            if not connected:
 
-        return True
+                logger.warning(
+                    "[MARKET] Первый connection check failed."
+                )
+
+                # Give websocket another chance.
+                await asyncio.sleep(3)
+
+                connected = await self._check_connection()
+
+            if not connected:
+
+                logger.error(
+                    "[MARKET] STEP 4/5 FAILED: connection."
+                )
+
+                await self.disconnect()
+
+                return False
+
+            # ------------------------------------------------
+            # READY
+            # ------------------------------------------------
+
+            self.connected = True
+
+            logger.info(
+                "[MARKET] STEP 5/5: Pocket Option connected."
+            )
+
+            logger.info(
+                "[MARKET] MARKET READY."
+            )
+
+            return True
 
     # ========================================================
-    # IS CONNECTED
+    # CANDLES
+    # ========================================================
+
+    async def candles(
+        self,
+        pair: str,
+        minutes: int = 1,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+
+        if not self.connected or self.client is None:
+            raise RuntimeError(
+                "Market is not connected"
+            )
+
+        pair = str(pair).strip()
+
+        if not pair:
+            raise ValueError(
+                "Pair is empty"
+            )
+
+        minutes = max(
+            1,
+            int(minutes),
+        )
+
+        limit = max(
+            1,
+            int(limit),
+        )
+
+        # ----------------------------------------------------
+        # Current library API
+        # ----------------------------------------------------
+
+        get_candles = getattr(
+            self.client,
+            "get_candles",
+            None,
+        )
+
+        candles_method = getattr(
+            self.client,
+            "candles",
+            None,
+        )
+
+        try:
+
+            if callable(get_candles):
+
+                logger.debug(
+                    "[MARKET] get_candles(%s, %s, %s)",
+                    pair,
+                    minutes,
+                    limit,
+                )
+
+                result = await asyncio.wait_for(
+                    get_candles(
+                        pair,
+                        minutes * 60,
+                        limit,
+                    ),
+                    timeout=CANDLE_REQUEST_TIMEOUT,
+                )
+
+            elif callable(candles_method):
+
+                logger.debug(
+                    "[MARKET] candles(%s, %s, %s)",
+                    pair,
+                    minutes,
+                    limit,
+                )
+
+                result = await asyncio.wait_for(
+                    candles_method(
+                        pair,
+                        minutes * 60,
+                        limit,
+                    ),
+                    timeout=CANDLE_REQUEST_TIMEOUT,
+                )
+
+            else:
+
+                raise RuntimeError(
+                    "PocketOption client has no candle method"
+                )
+
+        except asyncio.TimeoutError:
+
+            logger.error(
+                "[MARKET] Candle request timeout: %s",
+                pair,
+            )
+
+            raise
+
+        except Exception:
+
+            logger.exception(
+                "[MARKET] Candle request failed: %s",
+                pair,
+            )
+
+            self.connected = False
+
+            raise
+
+        if result is None:
+            return []
+
+        # ----------------------------------------------------
+        # Normalize
+        # ----------------------------------------------------
+
+        if isinstance(result, tuple):
+            result = result[0]
+
+        if not isinstance(result, list):
+            try:
+                result = list(result)
+            except Exception:
+                return []
+
+        normalized: list[dict[str, Any]] = []
+
+        for candle in result:
+
+            if isinstance(candle, dict):
+
+                item = dict(candle)
+
+            else:
+
+                item = {}
+
+                for name in (
+                    "timestamp",
+                    "time",
+                    "timestamp_ms",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                ):
+
+                    try:
+                        value = getattr(
+                            candle,
+                            name,
+                            None,
+                        )
+
+                        if value is not None:
+                            item[name] = value
+
+                    except Exception:
+                        pass
+
+            if not item:
+                continue
+
+            # ------------------------------------------------
+            # Time
+            # ------------------------------------------------
+
+            timestamp = (
+                item.get("timestamp")
+                or item.get("time")
+                or item.get("timestamp_ms")
+            )
+
+            if timestamp is None:
+                continue
+
+            try:
+                timestamp = float(timestamp)
+
+                # milliseconds -> seconds
+                if timestamp > 10_000_000_000:
+                    timestamp /= 1000.0
+
+            except Exception:
+                continue
+
+            # ------------------------------------------------
+            # OHLC
+            # ------------------------------------------------
+
+            try:
+
+                open_price = float(
+                    item.get("open")
+                )
+
+                high_price = float(
+                    item.get("high")
+                )
+
+                low_price = float(
+                    item.get("low")
+                )
+
+                close_price = float(
+                    item.get("close")
+                )
+
+            except Exception:
+                continue
+
+            try:
+                volume = float(
+                    item.get(
+                        "volume",
+                        0,
+                    )
+                    or 0
+                )
+            except Exception:
+                volume = 0.0
+
+            normalized.append(
+                {
+                    "timestamp": timestamp,
+                    "datetime": timestamp,
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "volume": volume,
+                }
+            )
+
+        normalized.sort(
+            key=lambda x: x["timestamp"]
+        )
+
+        if limit > 0:
+            normalized = normalized[-limit:]
+
+        logger.debug(
+            "[MARKET] Получено свечей %s: %s",
+            pair,
+            len(normalized),
+        )
+
+        return normalized
+
+    # ========================================================
+    # DATAFRAME-LIKE DATA
+    # ========================================================
+
+    async def get_candles(
+        self,
+        pair: str,
+        minutes: int = 1,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+
+        return await self.candles(
+            pair=pair,
+            minutes=minutes,
+            limit=limit,
+        )
+
+    # ========================================================
+    # SERVER TIME
+    # ========================================================
+
+    async def server_time(self) -> Optional[int]:
+
+        if self.client is None:
+            return None
+
+        method = getattr(
+            self.client,
+            "server_time",
+            None,
+        )
+
+        if not callable(method):
+            return None
+
+        try:
+            result = await asyncio.wait_for(
+                method(),
+                timeout=10,
+            )
+
+            if result is None:
+                return None
+
+            return int(result)
+
+        except Exception:
+            logger.exception(
+                "[MARKET] server_time failed."
+            )
+            return None
+
+    # ========================================================
+    # RECONNECT
+    # ========================================================
+
+    async def reconnect(self) -> bool:
+
+        if not self.ssid:
+            return await self.connect()
+
+        try:
+
+            if self.client is None:
+                return await self.connect()
+
+            reconnect_method = getattr(
+                self.client,
+                "reconnect",
+                None,
+            )
+
+            if callable(reconnect_method):
+
+                logger.info(
+                    "[MARKET] Использую reconnect() библиотеки."
+                )
+
+                await asyncio.wait_for(
+                    reconnect_method(),
+                    timeout=CONNECT_TIMEOUT,
+                )
+
+                await asyncio.sleep(3)
+
+                if await self._check_connection():
+
+                    self.connected = True
+
+                    logger.info(
+                        "[MARKET] Reconnect успешен."
+                    )
+
+                    return True
+
+        except Exception:
+            logger.exception(
+                "[MARKET] reconnect() failed."
+            )
+
+        self.connected = False
+
+        return await self.connect()
+
+    # ========================================================
+    # DISCONNECT
+    # ========================================================
+
+    async def disconnect(self) -> None:
+
+        self.connected = False
+
+        client = self.client
+
+        if client is None:
+            return
+
+        self.client = None
+
+        # ----------------------------------------------------
+        # shutdown()
+        # ----------------------------------------------------
+
+        shutdown = getattr(
+            client,
+            "shutdown",
+            None,
+        )
+
+        if callable(shutdown):
+
+            try:
+
+                logger.info(
+                    "[MARKET] Закрываю PocketOption client..."
+                )
+
+                await asyncio.wait_for(
+                    shutdown(),
+                    timeout=CLIENT_CLOSE_TIMEOUT,
+                )
+
+            except asyncio.TimeoutError:
+
+                logger.warning(
+                    "[MARKET] Client shutdown timeout."
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "[MARKET] Client shutdown error."
+                )
+
+            return
+
+        # ----------------------------------------------------
+        # close()
+        # ----------------------------------------------------
+
+        close = getattr(
+            client,
+            "close",
+            None,
+        )
+
+        if callable(close):
+
+            try:
+
+                result = close()
+
+                if asyncio.iscoroutine(result):
+                    await asyncio.wait_for(
+                        result,
+                        timeout=CLIENT_CLOSE_TIMEOUT,
+                    )
+
+            except Exception:
+
+                logger.exception(
+                    "[MARKET] Client close error."
+                )
+
+    # ========================================================
+    # CLOSE ALIAS
+    # ========================================================
+
+    async def close(self) -> None:
+        await self.disconnect()
+
+    # ========================================================
+    # STATUS
     # ========================================================
 
     def is_connected(self) -> bool:
@@ -830,556 +1289,109 @@ class PocketMarket:
         )
 
     # ========================================================
-    # CANDLES
+    # BALANCE
     # ========================================================
 
-    async def get_candles(
-        self,
-        asset: str,
-        period: int = 60,
-        count: int = 200,
-    ) -> list[Candle]:
-        """
-        Получение свечей.
+    async def balance(self) -> Optional[float]:
 
-        period:
-            секунды.
-
-        Основной режим:
-            get_candles_live()
-
-        Fallback:
-            get_candles()
-        """
-
-        if not self.is_connected():
-            raise RuntimeError(
-                "Pocket Option market disconnected"
-            )
-
-        if not asset:
-            raise ValueError(
-                "asset is empty"
-            )
-
-        # ----------------------------------------------------
-        # LIVE
-        # ----------------------------------------------------
-
-        live_method = getattr(
-            self.client,
-            "get_candles_live",
-            None,
-        )
-
-        if callable(live_method):
-            try:
-                raw = await asyncio.wait_for(
-                    live_method(
-                        asset,
-                        period,
-                    ),
-                    timeout=CANDLE_REQUEST_TIMEOUT,
-                )
-
-                candles = self._normalize_candles(
-                    raw
-                )
-
-                if candles:
-                    return candles[-count:]
-
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "[MARKET] get_candles_live timeout: %s",
-                    asset,
-                )
-
-            except Exception as exc:
-                logger.warning(
-                    "[MARKET] get_candles_live failed %s: %s",
-                    asset,
-                    exc,
-                )
-
-        # ----------------------------------------------------
-        # FALLBACK
-        # ----------------------------------------------------
-
-        get_method = getattr(
-            self.client,
-            "get_candles",
-            None,
-        )
-
-        if not callable(get_method):
-            self.connected = False
-
-            raise RuntimeError(
-                "PocketOption client has no candle method"
-            )
-
-        try:
-            raw = await asyncio.wait_for(
-                get_method(
-                    asset,
-                    period,
-                    count,
-                ),
-                timeout=CANDLE_REQUEST_TIMEOUT,
-            )
-
-            candles = self._normalize_candles(
-                raw
-            )
-
-            if not candles:
-                raise RuntimeError(
-                    "Empty candle response"
-                )
-
-            return candles[-count:]
-
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                f"Candle request timeout: {asset}"
-            )
-
-        except Exception:
-            if not self._client_looks_alive():
-                self.connected = False
-
-            raise
-
-    # ========================================================
-    # ALIAS
-    # ========================================================
-
-    async def candles(
-        self,
-        asset: str,
-        minutes: int = 1,
-        limit: int = 200,
-    ) -> list[Candle]:
-        """
-        Удобный интерфейс для signal engine.
-
-        minutes=1 -> period=60 секунд.
-        """
-
-        period = max(
-            1,
-            int(minutes),
-        ) * 60
-
-        return await self.get_candles(
-            asset=asset,
-            period=period,
-            count=limit,
-        )
-
-    async def get_candle_data(
-        self,
-        asset: str,
-        period: int = 60,
-        count: int = 200,
-    ) -> list[Candle]:
-        return await self.get_candles(
-            asset,
-            period,
-            count,
-        )
-
-    # ========================================================
-    # NORMALIZE
-    # ========================================================
-
-    def _normalize_candles(
-        self,
-        raw: Any,
-    ) -> list[Candle]:
-        if raw is None:
-            return []
-
-        # ----------------------------------------------------
-        # DICT WRAPPER
-        # ----------------------------------------------------
-
-        if isinstance(
-            raw,
-            dict,
-        ):
-            for key in (
-                "data",
-                "candles",
-                "history",
-                "result",
-            ):
-                if key in raw:
-                    raw = raw[key]
-                    break
-
-        # ----------------------------------------------------
-        # OBJECT WRAPPER
-        # ----------------------------------------------------
-
-        if not isinstance(
-            raw,
-            (list, tuple),
-        ):
-            for attr in (
-                "data",
-                "candles",
-                "history",
-                "result",
-            ):
-                try:
-                    value = getattr(
-                        raw,
-                        attr,
-                        None,
-                    )
-
-                    if value is not None:
-                        raw = value
-                        break
-
-                except Exception:
-                    pass
-
-        if not isinstance(
-            raw,
-            (list, tuple),
-        ):
-            return []
-
-        result: list[Candle] = []
-
-        for item in raw:
-            try:
-                candle = self._normalize_one(
-                    item
-                )
-
-                if candle is not None:
-                    result.append(
-                        candle
-                    )
-
-            except Exception:
-                logger.debug(
-                    "[MARKET] Не удалось нормализовать candle: %r",
-                    item,
-                )
-
-        result.sort(
-            key=lambda x: x.timestamp
-        )
-
-        return result
-
-    def _normalize_one(
-        self,
-        item: Any,
-    ) -> Optional[Candle]:
-        # ----------------------------------------------------
-        # DICT
-        # ----------------------------------------------------
-
-        if isinstance(
-            item,
-            dict,
-        ):
-            timestamp = (
-                item.get("timestamp")
-                or item.get("time")
-                or item.get("at")
-                or item.get("from")
-            )
-
-            open_price = (
-                item.get("open")
-                or item.get("o")
-            )
-
-            high = (
-                item.get("high")
-                or item.get("h")
-            )
-
-            low = (
-                item.get("low")
-                or item.get("l")
-            )
-
-            close = (
-                item.get("close")
-                or item.get("c")
-            )
-
-            volume = (
-                item.get("volume")
-                or item.get("v")
-                or 0
-            )
-
-        # ----------------------------------------------------
-        # LIST / TUPLE
-        # ----------------------------------------------------
-
-        elif isinstance(
-            item,
-            (list, tuple),
-        ):
-            if len(item) < 5:
-                return None
-
-            timestamp = item[0]
-            open_price = item[1]
-            high = item[2]
-            low = item[3]
-            close = item[4]
-
-            volume = (
-                item[5]
-                if len(item) > 5
-                else 0
-            )
-
-        # ----------------------------------------------------
-        # OBJECT
-        # ----------------------------------------------------
-
-        else:
-            timestamp = getattr(
-                item,
-                "timestamp",
-                getattr(
-                    item,
-                    "time",
-                    None,
-                ),
-            )
-
-            open_price = getattr(
-                item,
-                "open",
-                getattr(
-                    item,
-                    "o",
-                    None,
-                ),
-            )
-
-            high = getattr(
-                item,
-                "high",
-                getattr(
-                    item,
-                    "h",
-                    None,
-                ),
-            )
-
-            low = getattr(
-                item,
-                "low",
-                getattr(
-                    item,
-                    "l",
-                    None,
-                ),
-            )
-
-            close = getattr(
-                item,
-                "close",
-                getattr(
-                    item,
-                    "c",
-                    None,
-                ),
-            )
-
-            volume = getattr(
-                item,
-                "volume",
-                getattr(
-                    item,
-                    "v",
-                    0,
-                ),
-            )
-
-        if (
-            timestamp is None
-            or open_price is None
-            or high is None
-            or low is None
-            or close is None
-        ):
+        if self.client is None:
             return None
 
-        timestamp = float(
-            timestamp
-        )
-
-        # Milliseconds -> seconds
-        if timestamp > 10_000_000_000:
-            timestamp /= 1000.0
-
-        return Candle(
-            timestamp=timestamp,
-            open=float(
-                open_price
-            ),
-            high=float(
-                high
-            ),
-            low=float(
-                low
-            ),
-            close=float(
-                close
-            ),
-            volume=float(
-                volume or 0
-            ),
-        )
-
-    # ========================================================
-    # CLIENT HEALTH
-    # ========================================================
-
-    def _client_looks_alive(self) -> bool:
-        if self.client is None:
-            return False
-
-        # Если client существует, считаем его потенциально
-        # живым. Реальное состояние проверяется запросом.
-        return True
-
-    # ========================================================
-    # FRESHNESS
-    # ========================================================
-
-    def candles_are_fresh(
-        self,
-        candles: list[Candle],
-        max_age_seconds: int = 180,
-    ) -> bool:
-        if not candles:
-            return False
-
-        latest = candles[-1]
-
-        now = asyncio.get_running_loop()
-
-        # Здесь не используем loop time для timestamp.
-        import time
-
-        age = (
-            time.time()
-            - float(latest.timestamp)
-        )
-
-        return (
-            age <= max_age_seconds
-        )
-
-    # ========================================================
-    # TEST
-    # ========================================================
-
-    async def test_market(
-        self,
-        asset: Optional[str] = None,
-    ) -> bool:
-        if not self.is_connected():
-            return False
-
-        if asset is None:
-            try:
-                pairs = getattr(
-                    config,
-                    "pairs",
-                    [],
-                )
-
-                if pairs:
-                    asset = pairs[0][1]
-
-            except Exception:
-                asset = None
-
-        if not asset:
-            return False
-
-        try:
-            candles = await self.candles(
-                asset,
-                minutes=1,
-                limit=10,
-            )
-
-            return bool(
-                candles
-            )
-
-        except Exception:
-            logger.exception(
-                "[MARKET] Market test failed."
-            )
-            return False
-
-    # ========================================================
-    # DISCONNECT
-    # ========================================================
-
-    async def disconnect(self):
-        self.connected = False
-
-        client = self.client
-        self.client = None
-
-        if client is None:
-            return
-
-        close_method = getattr(
-            client,
-            "close",
+        method = getattr(
+            self.client,
+            "balance",
             None,
         )
 
-        if not callable(
-            close_method
-        ):
-            return
+        if not callable(method):
+            return None
 
         try:
-            result = close_method()
 
-            if asyncio.iscoroutine(result):
-                await asyncio.wait_for(
-                    result,
-                    timeout=CLIENT_CLOSE_TIMEOUT,
-                )
-
-        except Exception:
-            logger.exception(
-                "[MARKET] Ошибка закрытия client."
+            result = await asyncio.wait_for(
+                method(),
+                timeout=BALANCE_TIMEOUT,
             )
 
-    # ========================================================
-    # CLOSE
-    # ========================================================
+            if result is None:
+                return None
 
-    async def close(self):
-        await self.disconnect()
+            return float(result)
+
+        except Exception:
+
+            logger.exception(
+                "[MARKET] Balance request failed."
+            )
+
+            return None
 
 
 # ============================================================
-# GLOBAL MARKET
+# MODULE TEST
 # ============================================================
 
-market = PocketMarket()
+if __name__ == "__main__":
+
+    async def _test():
+
+        logging.basicConfig(
+            level=logging.INFO,
+            format=(
+                "%(asctime)s | "
+                "%(levelname)s | "
+                "%(name)s | "
+                "%(message)s"
+            ),
+        )
+
+        market = PocketMarket()
+
+        try:
+
+            ok = await market.connect()
+
+            print(
+                "CONNECTED:",
+                ok,
+            )
+
+            if ok:
+
+                balance = await market.balance()
+
+                print(
+                    "BALANCE:",
+                    balance,
+                )
+
+                try:
+
+                    candles = await market.candles(
+                        "EURUSD_otc",
+                        minutes=1,
+                        limit=10,
+                    )
+
+                    print(
+                        "CANDLES:",
+                        len(candles),
+                    )
+
+                    if candles:
+                        print(
+                            candles[-1]
+                        )
+
+                except Exception as exc:
+
+                    print(
+                        "CANDLE ERROR:",
+                        exc,
+                    )
+
+        finally:
+
+            await market.disconnect()
+
+    asyncio.run(_test())
