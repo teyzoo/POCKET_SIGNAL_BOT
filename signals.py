@@ -21,8 +21,7 @@ class SignalResult:
     # Техническое качество сигнала.
     quality: float
 
-    # Точное плановое время входа:
-    # начало следующей M1-свечи после последней закрытой.
+    # Точное плановое время входа.
     entry_time: datetime
 
     # Плановое время окончания экспирации.
@@ -34,12 +33,57 @@ class SignalResult:
     reasons: list[str]
 
 
+# ============================================================
+# DATETIME
+# ============================================================
+
 def _utc_datetime(value: datetime) -> datetime:
+    """
+    Приводит datetime к UTC.
+
+    ВАЖНО:
+    market.py уже нормализует timestamps внешнего
+    источника в UTC. Поэтому naive datetime здесь
+    трактуется как UTC.
+    """
+
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
 
     return value.astimezone(timezone.utc)
 
+
+def _next_minute(moment: datetime | None = None) -> datetime:
+    """
+    Возвращает ближайшую следующую полную минуту.
+
+    Например:
+
+    20:55:03 -> 20:56:00
+    20:55:59 -> 20:56:00
+    20:56:00 -> 20:57:00
+
+    Это используется как фактическое плановое
+    время входа, чтобы сигнал никогда не назначался
+    в прошлом.
+    """
+
+    now = _utc_datetime(
+        moment or datetime.now(timezone.utc)
+    )
+
+    return (
+        now.replace(
+            second=0,
+            microsecond=0,
+        )
+        + timedelta(minutes=1)
+    )
+
+
+# ============================================================
+# LAST CLOSED M1
+# ============================================================
 
 def _last_closed_m1(
     candles: list[Candle],
@@ -53,12 +97,20 @@ def _last_closed_m1(
         moment or datetime.now(timezone.utc)
     )
 
-    closed = []
+    closed: list[Candle] = []
 
     for candle in candles:
-        candle_time = _utc_datetime(candle.time)
 
-        if candle_time + timedelta(minutes=1) <= moment:
+        candle_time = _utc_datetime(
+            candle.time
+        )
+
+        candle_close = (
+            candle_time
+            + timedelta(minutes=1)
+        )
+
+        if candle_close <= moment:
             closed.append(candle)
 
     if not closed:
@@ -75,7 +127,11 @@ def _last_closed_m1(
 # ============================================================
 
 def ema(values, period: int):
-    values = np.asarray(values, dtype=float)
+
+    values = np.asarray(
+        values,
+        dtype=float,
+    )
 
     result = np.full(
         len(values),
@@ -85,16 +141,22 @@ def ema(values, period: int):
     if len(values) < period:
         return result
 
-    alpha = 2.0 / (period + 1.0)
+    alpha = 2.0 / (
+        period + 1.0
+    )
 
     result[period - 1] = np.mean(
         values[:period]
     )
 
-    for i in range(period, len(values)):
+    for i in range(
+        period,
+        len(values),
+    ):
         result[i] = (
             alpha * values[i]
-            + (1.0 - alpha) * result[i - 1]
+            + (1.0 - alpha)
+            * result[i - 1]
         )
 
     return result
@@ -104,8 +166,15 @@ def ema(values, period: int):
 # RSI
 # ============================================================
 
-def rsi(values, period: int = 14):
-    values = np.asarray(values, dtype=float)
+def rsi(
+    values,
+    period: int = 14,
+):
+
+    values = np.asarray(
+        values,
+        dtype=float,
+    )
 
     result = np.full(
         len(values),
@@ -152,6 +221,7 @@ def rsi(values, period: int = 14):
         period + 1,
         len(values),
     ):
+
         avg_gain[i] = (
             (
                 avg_gain[i - 1]
@@ -172,9 +242,13 @@ def rsi(values, period: int = 14):
         period,
         len(values),
     ):
+
         if avg_loss[i] == 0:
+
             result[i] = 100.0
+
         else:
+
             rs = (
                 avg_gain[i]
                 / avg_loss[i]
@@ -182,7 +256,8 @@ def rsi(values, period: int = 14):
 
             result[i] = (
                 100.0
-                - 100.0 / (1.0 + rs)
+                - 100.0
+                / (1.0 + rs)
             )
 
     return result
@@ -196,6 +271,7 @@ def atr(
     candles: list[Candle],
     period: int = 14,
 ):
+
     result = np.full(
         len(candles),
         np.nan,
@@ -262,7 +338,9 @@ def aggregate_candles(
 
     candles = sorted(
         candles,
-        key=lambda x: _utc_datetime(x.time),
+        key=lambda x: _utc_datetime(
+            x.time
+        ),
     )
 
     if timeframe <= 1:
@@ -295,13 +373,18 @@ def aggregate_candles(
                 [],
             ).append(candle)
 
-        result = []
+        result: list[Candle] = []
 
-        for bucket in sorted(buckets):
+        for bucket in sorted(
+            buckets
+        ):
 
             group = sorted(
                 buckets[bucket],
-                key=lambda x: _utc_datetime(x.time),
+                key=lambda x:
+                    _utc_datetime(
+                        x.time
+                    ),
             )
 
             if not group:
@@ -330,11 +413,15 @@ def aggregate_candles(
                 )
             )
 
-    # Убираем последнюю свечу,
-    # если она ещё не закрылась.
-    now = datetime.now(timezone.utc)
+    # Убираем незакрытую свечу.
 
-    candle_seconds = timeframe * 60
+    now = datetime.now(
+        timezone.utc
+    )
+
+    candle_seconds = (
+        timeframe * 60
+    )
 
     if result:
 
@@ -377,14 +464,17 @@ class SignalEngine:
             return None
 
         # ====================================================
-        # ФИКСАЦИЯ ВХОДА
+        # CURRENT TIME
         # ====================================================
 
         signal_moment = datetime.now(
             timezone.utc
         )
 
-        # Берём последнюю полностью закрытую M1-свечу.
+        # ====================================================
+        # LAST CLOSED M1
+        # ====================================================
+
         entry_candle = _last_closed_m1(
             candles,
             signal_moment,
@@ -398,31 +488,54 @@ class SignalEngine:
         )
 
         # ====================================================
-        # ТОЧНОЕ ВРЕМЯ ВХОДА
+        # EXACT ENTRY TIME
         # ====================================================
         #
-        # Если последняя закрытая свеча:
+        # ВАЖНО:
         #
-        # 20:29 -> 20:30
+        # Раньше время входа строилось напрямую
+        # из timestamp свечи:
         #
-        # то вход:
+        # candle_time + 1 min
         #
-        # 20:30
+        # Из-за этого ошибка timezone/будущий
+        # timestamp провайдера могла дать:
         #
-        # Экспирация 5 минут:
+        # сейчас 20:55
+        # вход 23:58
         #
-        # 20:35
+        # Теперь вход всегда привязан к реальному
+        # времени сервера.
+        #
+        # 20:55:01 -> 20:56
+        # 20:55:59 -> 20:56
         #
         # ====================================================
 
-        last_candle_start = _utc_datetime(
-            entry_candle.time
+        entry_time = _next_minute(
+            signal_moment
         )
 
-        entry_time = (
-            last_candle_start
-            + timedelta(minutes=1)
+        # ====================================================
+        # SAFETY CHECK
+        # ====================================================
+
+        entry_time = _utc_datetime(
+            entry_time
         )
+
+        # Вход не может быть раньше текущего момента.
+        if entry_time <= signal_moment:
+
+            entry_time = (
+                signal_moment
+                + timedelta(
+                    minutes=1
+                )
+            ).replace(
+                second=0,
+                microsecond=0,
+            )
 
         # ====================================================
         # AGGREGATED CANDLES
@@ -437,33 +550,53 @@ class SignalEngine:
             return None
 
         close = np.asarray(
-            [c.close for c in candles_tf],
+            [
+                c.close
+                for c in candles_tf
+            ],
             dtype=float,
         )
 
         high = np.asarray(
-            [c.high for c in candles_tf],
+            [
+                c.high
+                for c in candles_tf
+            ],
             dtype=float,
         )
 
         low = np.asarray(
-            [c.low for c in candles_tf],
+            [
+                c.low
+                for c in candles_tf
+            ],
             dtype=float,
         )
 
         volume = np.asarray(
-            [c.volume for c in candles_tf],
+            [
+                c.volume
+                for c in candles_tf
+            ],
             dtype=float,
         )
 
         if not (
-            np.all(np.isfinite(close))
-            and np.all(np.isfinite(high))
-            and np.all(np.isfinite(low))
+            np.all(
+                np.isfinite(close)
+            )
+            and np.all(
+                np.isfinite(high)
+            )
+            and np.all(
+                np.isfinite(low)
+            )
         ):
             return None
 
-        if np.any(close <= 0):
+        if np.any(
+            close <= 0
+        ):
             return None
 
         # ====================================================
@@ -495,7 +628,9 @@ class SignalEngine:
             14,
         )
 
-        if not np.isfinite(atr14[-1]):
+        if not np.isfinite(
+            atr14[-1]
+        ):
             return None
 
         current_atr = float(
@@ -519,7 +654,10 @@ class SignalEngine:
             26,
         )
 
-        macd = ema12 - ema26
+        macd = (
+            ema12
+            - ema26
+        )
 
         valid_macd = macd[
             np.isfinite(macd)
@@ -613,7 +751,9 @@ class SignalEngine:
         momentum = (
             price
             - float(
-                close[-1 - lookback]
+                close[
+                    -1 - lookback
+                ]
             )
         )
 
@@ -625,7 +765,9 @@ class SignalEngine:
         short_momentum = (
             price
             - float(
-                close[-1 - short_lookback]
+                close[
+                    -1 - short_lookback
+                ]
             )
         )
 
@@ -638,13 +780,17 @@ class SignalEngine:
         if len(volume) >= 20:
 
             avg_volume = float(
-                np.mean(volume[-20:])
+                np.mean(
+                    volume[-20:]
+                )
             )
 
             if avg_volume > 0:
 
                 volume_ratio = (
-                    float(volume[-1])
+                    float(
+                        volume[-1]
+                    )
                     / avg_volume
                 )
 
@@ -653,11 +799,15 @@ class SignalEngine:
         # ====================================================
 
         support = float(
-            np.min(low[-30:])
+            np.min(
+                low[-30:]
+            )
         )
 
         resistance = float(
-            np.max(high[-30:])
+            np.max(
+                high[-30:]
+            )
         )
 
         range_size = max(
@@ -759,8 +909,12 @@ class SignalEngine:
 
         if (
             len(ema21) >= 4
-            and np.isfinite(ema21[-1])
-            and np.isfinite(ema21[-4])
+            and np.isfinite(
+                ema21[-1]
+            )
+            and np.isfinite(
+                ema21[-4]
+            )
         ):
 
             slope = (
@@ -792,7 +946,9 @@ class SignalEngine:
             rsi14[-1]
         )
 
-        if np.isfinite(current_rsi):
+        if np.isfinite(
+            current_rsi
+        ):
 
             if 52 <= current_rsi <= 68:
 
@@ -856,7 +1012,9 @@ class SignalEngine:
         )
 
         previous_histogram = (
-            float(macd[-2])
+            float(
+                macd[-2]
+            )
             - float(
                 macd_signal_array[-2]
             )
@@ -864,7 +1022,8 @@ class SignalEngine:
 
         if (
             histogram > 0
-            and histogram > previous_histogram
+            and histogram
+            > previous_histogram
         ):
 
             up += 5
@@ -875,7 +1034,8 @@ class SignalEngine:
 
         elif (
             histogram < 0
-            and histogram < previous_histogram
+            and histogram
+            < previous_histogram
         ):
 
             down += 5
@@ -965,9 +1125,11 @@ class SignalEngine:
         # ====================================================
 
         if short_momentum > 0:
+
             up += 5
 
         elif short_momentum < 0:
+
             down += 5
 
         # ====================================================
