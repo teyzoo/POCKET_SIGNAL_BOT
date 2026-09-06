@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -113,8 +114,6 @@ USER_ANALYSIS_LOCKS: dict[
     asyncio.Lock,
 ] = {}
 
-# Главное исправление:
-# pair больше НЕ хранится внутри Telegram Message.
 USER_SELECTED_PAIRS: dict[
     int,
     str,
@@ -266,10 +265,34 @@ def get_config_timeframes():
             "В config.py отсутствует timeframes."
         )
 
-    return [
-        int(x)
-        for x in values
-    ]
+    result = []
+
+    for value in values:
+
+        try:
+
+            timeframe = int(value)
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            continue
+
+        if timeframe > 0:
+
+            result.append(
+                timeframe
+            )
+
+    if not result:
+
+        raise RuntimeError(
+            "В config.py нет корректных timeframes."
+        )
+
+    return result
 
 
 def pair_name(
@@ -362,6 +385,7 @@ def candle_close_at_or_before(
 ) -> float | None:
 
     if not candles:
+
         return None
 
     target_time = utc_time(
@@ -383,8 +407,6 @@ def candle_close_at_or_before(
             )
         )
 
-        # Берём только полностью закрытую M1-свечу,
-        # которая завершилась не позже целевого момента.
         if candle_close <= target_time:
 
             valid.append(
@@ -392,6 +414,7 @@ def candle_close_at_or_before(
             )
 
     if not valid:
+
         return None
 
     candle = max(
@@ -421,6 +444,7 @@ async def pair_history_text(
         for item in stats:
 
             if item["pair"] != pair:
+
                 continue
 
             decided = (
@@ -429,6 +453,7 @@ async def pair_history_text(
             )
 
             if decided <= 0:
+
                 break
 
             return (
@@ -580,6 +605,7 @@ def signal_pair_keyboard():
             row = []
 
     if row:
+
         rows.append(row)
 
     rows.append(
@@ -620,6 +646,7 @@ def signal_time_keyboard():
             row = []
 
     if row:
+
         rows.append(row)
 
     rows.append(
@@ -646,7 +673,7 @@ def signal_time_keyboard():
 
 
 # ============================================================
-# CALLBACK
+# SAFE TELEGRAM
 # ============================================================
 
 async def safe_callback_answer(
@@ -685,8 +712,10 @@ async def safe_edit(
 
     except Exception as exc:
 
-        # Telegram возвращает ошибку, если текст не изменился.
-        if "message is not modified" not in str(exc).lower():
+        if (
+            "message is not modified"
+            not in str(exc).lower()
+        ):
 
             logger.debug(
                 "[TELEGRAM] edit error: %s",
@@ -777,7 +806,7 @@ async def signal_button(
 
 
 # ============================================================
-# PAIR
+# PAIR SELECTION
 # ============================================================
 
 @dp.callback_query(
@@ -791,31 +820,361 @@ async def signal_pair(
         callback
     )
 
-    pair = callback.data.split(
-        ":",
-        1,
-    )[1]
+    if not callback.message:
 
-    USER_SELECTED_PAIRS[
-        callback.from_user.id
-    ] = pair
+        return
 
-    if callback.message:
+    user_id = callback.from_user.id
 
-        await safe_edit(
-            callback.message,
-            (
-                "⏱ <b>ВЫБЕРИТЕ ЭКСПИРАЦИЮ</b>\n\n"
-                f"💱 Пара: "
-                f"{'ЛЮБАЯ' if pair == 'ANY' else pair_name(pair)}\n\n"
-                "Вход выполняется ПО ЗАЯВКЕ."
-            ),
-            signal_time_keyboard(),
+    selected_pair = (
+        callback.data.split(
+            ":",
+            1
+        )[1]
+    )
+
+    if selected_pair == "ANY":
+
+        USER_SELECTED_PAIRS[
+            user_id
+        ] = "ANY"
+
+        pair_text = (
+            "🌐 <b>ЛЮБАЯ ПАРА</b>"
         )
+
+    else:
+
+        USER_SELECTED_PAIRS[
+            user_id
+        ] = selected_pair
+
+        pair_text = (
+            f"💱 <b>{pair_name(selected_pair)}</b>"
+        )
+
+    await safe_edit(
+        callback.message,
+        (
+            "⏱ <b>ВЫБЕРИТЕ ВРЕМЯ ЭКСПИРАЦИИ</b>\n\n"
+            f"{pair_text}\n\n"
+            "Можно выбрать конкретную экспирацию "
+            "или проверить все доступные варианты."
+        ),
+        signal_time_keyboard(),
+    )
 
 
 # ============================================================
-# TIME
+# SIGNAL SCAN
+# ============================================================
+
+async def scan_market(
+    pairs: list[str],
+    timeframes: list[int],
+    message: Message,
+) -> object | None:
+
+    total = (
+        len(pairs)
+        * len(timeframes)
+    )
+
+    if total <= 0:
+
+        return None
+
+    checked = 0
+
+    best_signal = None
+    best_candles = None
+
+    last_progress_update = 0.0
+
+    async def update_progress(
+        pair: str | None = None,
+        timeframe: int | None = None,
+        stage: str = "Анализ",
+        force: bool = False,
+    ):
+
+        nonlocal last_progress_update
+
+        now = time.monotonic()
+
+        # Не отправляем Telegram сотни edit подряд.
+        if (
+            not force
+            and now - last_progress_update < 0.8
+        ):
+
+            return
+
+        last_progress_update = now
+
+        current = ""
+
+        if pair is not None:
+
+            current += (
+                f"💱 <b>Пара:</b> "
+                f"{pair_name(pair)}\n"
+            )
+
+        if timeframe is not None:
+
+            current += (
+                f"⏱ <b>Экспирация:</b> "
+                f"{timeframe} мин\n"
+            )
+
+        await safe_edit(
+            message,
+            (
+                "🔎 <b>ПРОВЕРКА РЫНКА</b>\n\n"
+                f"{current}"
+                f"⚙️ <b>Этап:</b> {stage}\n\n"
+                f"📊 <b>Проверено:</b> "
+                f"{checked}/{total}"
+            ),
+        )
+
+    await update_progress(
+        stage="Подключение к рынку...",
+        force=True,
+    )
+
+    if not await ensure_market_ready():
+
+        await safe_edit(
+            message,
+            (
+                "❌ <b>НЕ УДАЛОСЬ ПОДКЛЮЧИТЬСЯ "
+                "К ИСТОЧНИКУ РЫНКА</b>\n\n"
+                "Источник рыночных данных сейчас "
+                "недоступен.\n\n"
+                "Попробуйте ещё раз через несколько секунд."
+            ),
+        )
+
+        return None
+
+    await update_progress(
+        stage="Рынок подключён ✅",
+        force=True,
+    )
+
+    for pair in pairs:
+
+        await update_progress(
+            pair=pair,
+            stage="Получение M1-свечей...",
+            force=True,
+        )
+
+        candles = None
+
+        try:
+
+            candle_limit = int(
+                getattr(
+                    config,
+                    "MARKET_CANDLE_LIMIT",
+                    1600,
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            candle_limit = 1600
+
+        try:
+
+            candles = await market.candles(
+                pair,
+                limit=candle_limit,
+            )
+
+        except Exception as exc:
+
+            logger.exception(
+                "[SCAN] Ошибка свечей %s: %s",
+                pair,
+                exc,
+            )
+
+            candles = None
+
+        if not candles:
+
+            logger.warning(
+                "[SCAN] Нет свечей для %s",
+                pair,
+            )
+
+            checked += len(timeframes)
+
+            await update_progress(
+                pair=pair,
+                stage="Свечи недоступны",
+                force=True,
+            )
+
+            continue
+
+        for timeframe in timeframes:
+
+            checked += 1
+
+            await update_progress(
+                pair=pair,
+                timeframe=timeframe,
+                stage="Расчёт индикаторов...",
+            )
+
+            try:
+
+                signal = engine.analyze(
+                    pair,
+                    timeframe,
+                    candles,
+                )
+
+            except Exception as exc:
+
+                logger.exception(
+                    "[SCAN] Ошибка анализа "
+                    "%s / %s мин: %s",
+                    pair,
+                    timeframe,
+                    exc,
+                )
+
+                signal = None
+
+            if signal is None:
+
+                continue
+
+            try:
+
+                quality = float(
+                    getattr(
+                        signal,
+                        "quality",
+                        0.0,
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                quality = 0.0
+
+            try:
+
+                probability = float(
+                    getattr(
+                        signal,
+                        "probability",
+                        0.0,
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                probability = 0.0
+
+            if best_signal is None:
+
+                best_signal = signal
+                best_candles = candles
+
+                logger.info(
+                    "[SCAN] Первый кандидат: "
+                    "%s %s мин quality=%.1f probability=%.1f",
+                    pair,
+                    timeframe,
+                    quality,
+                    probability,
+                )
+
+            else:
+
+                try:
+
+                    best_quality = float(
+                        getattr(
+                            best_signal,
+                            "quality",
+                            0.0,
+                        )
+                    )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+
+                    best_quality = 0.0
+
+                try:
+
+                    best_probability = float(
+                        getattr(
+                            best_signal,
+                            "probability",
+                            0.0,
+                        )
+                    )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+
+                    best_probability = 0.0
+
+                # Сначала Quality Score.
+                # При равном качестве — техническая уверенность.
+                if (
+                    quality,
+                    probability,
+                ) > (
+                    best_quality,
+                    best_probability,
+                ):
+
+                    best_signal = signal
+                    best_candles = candles
+
+                    logger.info(
+                        "[SCAN] Новый лучший кандидат: "
+                        "%s %s мин quality=%.1f probability=%.1f",
+                        pair,
+                        timeframe,
+                        quality,
+                        probability,
+                    )
+
+    await update_progress(
+        stage="Анализ завершён",
+        force=True,
+    )
+
+    return best_signal
+
+
+# ============================================================
+# TIME SELECTION
 # ============================================================
 
 @dp.callback_query(
@@ -829,25 +1188,126 @@ async def signal_time(
         callback
     )
 
-    timeframe_raw = callback.data.split(
-        ":",
-        1,
-    )[1]
-
     if not callback.message:
-        return
 
-    timeframe = (
-        None
-        if timeframe_raw == "ANY"
-        else int(timeframe_raw)
-    )
+        return
 
     user_id = callback.from_user.id
 
-    selected_pair = USER_SELECTED_PAIRS.get(
+    timeframe_raw = callback.data.split(
+        ":",
+        1
+    )[1]
+
+    selected_pair = (
+        USER_SELECTED_PAIRS.get(
+            user_id,
+            "ANY",
+        )
+    )
+
+    # ========================================================
+    # ГЛАВНОЕ ИСПРАВЛЕНИЕ
+    # ========================================================
+    #
+    # Раньше:
+    #
+    #   ANY -> взять user.timeframe
+    #
+    # Поэтому если у пользователя было сохранено 20,
+    # кнопка "ЛЮБОЕ ВРЕМЯ" фактически превращалась
+    # в "20 минут".
+    #
+    # Теперь:
+    #
+    #   ANY -> ВСЕ timeframe из config.timeframes
+    #
+    # ========================================================
+
+    if timeframe_raw == "ANY":
+
+        timeframes = get_config_timeframes()
+
+        time_label = (
+            "ЛЮБОЕ ВРЕМЯ"
+        )
+
+        timeframes_label = ", ".join(
+            f"{x} мин"
+            for x in timeframes
+        )
+
+    else:
+
+        try:
+
+            selected_timeframe = int(
+                timeframe_raw
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            await safe_edit(
+                callback.message,
+                (
+                    "❌ <b>Некорректная экспирация.</b>\n\n"
+                    "Вернитесь назад и выберите время ещё раз."
+                ),
+            )
+
+            return
+
+        timeframes = [
+            selected_timeframe
+        ]
+
+        time_label = (
+            f"{selected_timeframe} мин"
+        )
+
+        timeframes_label = (
+            f"{selected_timeframe} мин"
+        )
+
+    # ========================================================
+    # PAIRS
+    # ========================================================
+
+    if selected_pair == "ANY":
+
+        pairs = [
+            symbol
+            for _, symbol
+            in get_config_pairs()
+        ]
+
+        pair_label = "ЛЮБАЯ ПАРА"
+
+    else:
+
+        pairs = [
+            selected_pair
+        ]
+
+        pair_label = pair_name(
+            selected_pair
+        )
+
+    total_combinations = (
+        len(pairs)
+        * len(timeframes)
+    )
+
+    logger.info(
+        "[SIGNAL] User %s requested: "
+        "pair=%s timeframes=%s combinations=%s",
         user_id,
-        "ANY",
+        pair_label,
+        timeframes,
+        total_combinations,
     )
 
     lock = get_user_lock(
@@ -856,309 +1316,40 @@ async def signal_time(
 
     async with lock:
 
-        if timeframe is None:
-
-            user = await get_user(
-                user_id
-            )
-
-            timeframe = (
-                int(user.timeframe)
-                if user is not None
-                else 5
-            )
-
-        if selected_pair == "ANY":
-
-            pair_label = "ЛЮБАЯ"
-
-        else:
-
-            pair_label = pair_name(
-                selected_pair
-            )
+        # ----------------------------------------------------
+        # INITIAL SCREEN
+        # ----------------------------------------------------
 
         await safe_edit(
             callback.message,
             (
                 "🔎 <b>ПРОВЕРКА РЫНКА</b>\n\n"
-                f"💱 Пара: {pair_label}\n"
-                f"⏱ Экспирация: {timeframe} мин\n\n"
-                "🔌 Подключение к рынку... ⏳\n"
-                "📥 Получение свечей... ⏳\n"
-                "📊 Проверка закрытых свечей... ⏳\n"
-                "🧮 Расчёт индикаторов... ⏳\n"
-                "🎯 Поиск сильного сигнала... ⏳"
-            )
+                f"💱 <b>Пара:</b> {pair_label}\n"
+                f"⏱ <b>Экспирация:</b> {time_label}\n"
+                f"📋 <b>Варианты:</b> "
+                f"{timeframes_label}\n\n"
+                f"📊 <b>Комбинаций:</b> "
+                f"{total_combinations}\n\n"
+                "🔌 Подключение к рынку..."
+            ),
         )
+
+        # ----------------------------------------------------
+        # SCAN
+        # ----------------------------------------------------
 
         try:
 
-            # ------------------------------------------------
-            # CONNECT
-            # ------------------------------------------------
-
-            if not await ensure_market_ready():
-
-                await safe_edit(
-                    callback.message,
-                    (
-                        "❌ <b>РЫНОК НЕДОСТУПЕН</b>\n\n"
-                        "Не удалось подключиться "
-                        "к источнику рыночных данных."
-                    ),
-                    main_keyboard(),
-                )
-
-                return
-
-            # ------------------------------------------------
-            # PAIRS
-            # ------------------------------------------------
-
-            if selected_pair == "ANY":
-
-                pairs = [
-                    symbol
-                    for _, symbol
-                    in get_config_pairs()
-                ]
-
-            else:
-
-                pairs = [
-                    selected_pair
-                ]
-
-            total = len(pairs)
-            checked = 0
-
-            found_signal = None
-            found_candles = None
-
-            # ------------------------------------------------
-            # SCAN
-            # ------------------------------------------------
-
-            for pair in pairs:
-
-                try:
-
-                    await safe_edit(
-                        callback.message,
-                        (
-                            "🔎 <b>ПРОВЕРКА РЫНКА</b>\n\n"
-                            f"💱 Пара: {pair_name(pair)}\n"
-                            f"⏱ Экспирация: {timeframe} мин\n\n"
-                            "🔌 Подключение к рынку... ✅\n"
-                            f"📥 Получение свечей... ⏳\n\n"
-                            f"📊 Проверено: {checked}/{total}"
-                        )
-                    )
-
-                    candles = await market.candles(
-                        pair,
-                        limit=int(
-                            getattr(
-                                config,
-                                "MARKET_CANDLE_LIMIT",
-                                1600,
-                            )
-                        ),
-                    )
-
-                    if not candles:
-
-                        checked += 1
-                        continue
-
-                    await safe_edit(
-                        callback.message,
-                        (
-                            "🔎 <b>ПРОВЕРКА РЫНКА</b>\n\n"
-                            f"💱 Пара: {pair_name(pair)}\n"
-                            f"⏱ Экспирация: {timeframe} мин\n\n"
-                            "🔌 Подключение к рынку... ✅\n"
-                            "📥 Получение свечей... ✅\n"
-                            "📊 Проверка закрытых свечей... ⏳\n"
-                            f"\n📊 Проверено: {checked}/{total}"
-                        )
-                    )
-
-                    signal = engine.analyze(
-                        pair,
-                        timeframe,
-                        candles,
-                    )
-
-                    checked += 1
-
-                    if signal is None:
-
-                        await safe_edit(
-                            callback.message,
-                            (
-                                "🔎 <b>ПРОВЕРКА РЫНКА</b>\n\n"
-                                f"💱 Последняя пара: "
-                                f"{pair_name(pair)}\n"
-                                f"⏱ Экспирация: {timeframe} мин\n\n"
-                                "📊 Проверка закрытых свечей... ✅\n"
-                                "🧮 Расчёт индикаторов... ✅\n"
-                                "🎯 Сильного сигнала на этой паре нет.\n\n"
-                                f"📊 Проверено: {checked}/{total}"
-                            )
-                        )
-
-                        continue
-
-                    # Выбираем самый качественный сигнал.
-                    if (
-                        found_signal is None
-                        or signal.quality
-                        > found_signal.quality
-                    ):
-
-                        found_signal = signal
-                        found_candles = candles
-
-                except Exception as exc:
-
-                    checked += 1
-
-                    logger.exception(
-                        "[SIGNAL] %s error: %s",
-                        pair,
-                        exc,
-                    )
-
-                    continue
-
-            # ------------------------------------------------
-            # NO SIGNAL
-            # ------------------------------------------------
-
-            if found_signal is None:
-
-                await safe_edit(
-                    callback.message,
-                    (
-                        "⚪ <b>СИЛЬНОГО СИГНАЛА СЕЙЧАС НЕТ.</b>\n\n"
-                        f"💱 {pair_label}\n"
-                        f"⏱ Экспирация: {timeframe} мин\n\n"
-                        f"📊 Проверено пар: {checked}/{total}\n\n"
-                        "Слабый сигнал не выдаю — "
-                        "это сделано специально, чтобы "
-                        "не искажать статистику."
-                    ),
-                    main_keyboard(),
-                )
-
-                return
-
-            # ------------------------------------------------
-            # ENTRY PRICE
-            # ------------------------------------------------
-
-            entry_price = (
-                getattr(
-                    found_signal,
-                    "entry_price",
-                    None,
-                )
-            )
-
-            if entry_price is None and found_candles:
-
-                # Резервный способ.
-                valid = []
-
-                for candle in found_candles:
-
-                    start = utc_time(
-                        candle.time
-                    )
-
-                    if (
-                        start
-                        + timedelta(minutes=1)
-                        <= found_signal.entry_time
-                    ):
-
-                        valid.append(
-                            candle
-                        )
-
-                if valid:
-
-                    last = max(
-                        valid,
-                        key=lambda x: utc_time(
-                            x.time
-                        ),
-                    )
-
-                    entry_price = float(
-                        last.close
-                    )
-
-            if entry_price is None:
-
-                await safe_edit(
-                    callback.message,
-                    (
-                        "⚠️ <b>СИГНАЛ НЕ СОХРАНЁН</b>\n\n"
-                        "Не удалось получить "
-                        "надёжную цену входа."
-                    ),
-                    main_keyboard(),
-                )
-
-                return
-
-            # ------------------------------------------------
-            # SAVE
-            # ------------------------------------------------
-
-            signal_id = await save_signal(
-                pair=found_signal.pair,
-                timeframe=found_signal.timeframe,
-                direction=found_signal.direction,
-                probability=found_signal.probability,
-                quality=found_signal.quality,
-                entry_time=found_signal.entry_time,
-                close_time=found_signal.close_time,
-                reasons=found_signal.reasons,
-                entry_price=entry_price,
-            )
-
-            logger.info(
-                "[SIGNAL] saved id=%s pair=%s direction=%s "
-                "entry=%s close=%s",
-                signal_id,
-                found_signal.pair,
-                found_signal.direction,
-                entry_price,
-                found_signal.close_time,
-            )
-
-            # ------------------------------------------------
-            # SEND
-            # ------------------------------------------------
-
-            text = await format_signal(
-                found_signal
-            )
-
-            await safe_edit(
-                callback.message,
-                text,
-                main_keyboard(),
+            signal = await scan_market(
+                pairs=pairs,
+                timeframes=timeframes,
+                message=callback.message,
             )
 
         except Exception as exc:
 
             logger.exception(
-                "[SIGNAL] Ошибка анализа: %s",
+                "[SIGNAL] Scan error: %s",
                 exc,
             )
 
@@ -1166,94 +1357,111 @@ async def signal_time(
                 callback.message,
                 (
                     "❌ <b>ОШИБКА АНАЛИЗА</b>\n\n"
-                    f"<code>{str(exc)[:500]}</code>"
+                    f"<code>{str(exc)[:1000]}</code>\n\n"
+                    "Попробуйте повторить проверку."
                 ),
-                main_keyboard(),
             )
 
+            return
 
-# ============================================================
-# SETTINGS
-# ============================================================
+        # ----------------------------------------------------
+        # NO SIGNAL
+        # ----------------------------------------------------
 
-@dp.callback_query(
-    F.data == "settings"
-)
-async def settings_button(
-    callback: CallbackQuery,
-):
+        if signal is None:
 
-    await safe_callback_answer(
-        callback
-    )
+            if timeframe_raw == "ANY":
 
-    user = await get_user(
-        callback.from_user.id
-    )
+                checked_timeframes = (
+                    timeframes_label
+                )
 
-    if user is None:
+            else:
 
-        await callback.message.answer(
-            "Пользователь не найден."
+                checked_timeframes = (
+                    f"{timeframes[0]} мин"
+                )
+
+            await safe_edit(
+                callback.message,
+                (
+                    "⚪ <b>СИЛЬНОГО СИГНАЛА "
+                    "СЕЙЧАС НЕТ</b>\n\n"
+                    f"💱 <b>Пара:</b> {pair_label}\n"
+                    f"⏱ <b>Проверены экспирации:</b> "
+                    f"{checked_timeframes}\n\n"
+                    "Я не буду выдавать слабый сигнал "
+                    "только ради того, чтобы что-то показать."
+                ),
+                InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="🔄 Проверить снова",
+                                callback_data="signal",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Главное меню",
+                                callback_data="back_main",
+                            )
+                        ],
+                    ]
+                ),
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # SAVE SIGNAL
+        # ----------------------------------------------------
+
+        try:
+
+            await save_signal(
+                signal
+            )
+
+        except Exception as exc:
+
+            logger.exception(
+                "[SIGNAL] Save error: %s",
+                exc,
+            )
+
+        # ----------------------------------------------------
+        # FINAL SIGNAL
+        # ----------------------------------------------------
+
+        text = await format_signal(
+            signal
         )
 
-        return
-
-    await safe_edit(
-        callback.message,
-        (
-            "⚙️ <b>НАСТРОЙКИ</b>\n\n"
-            f"💱 Пара: {user.pair}\n"
-            f"⏱ Таймфрейм: {user.timeframe} мин\n"
-            f"🤖 Автосигналы: "
-            f"{'ВКЛ' if user.auto_signals else 'ВЫКЛ'}"
-        ),
-        main_keyboard(),
-    )
-
-
-# ============================================================
-# AUTO
-# ============================================================
-
-@dp.callback_query(
-    F.data == "auto_toggle"
-)
-async def auto_toggle(
-    callback: CallbackQuery,
-):
-
-    await safe_callback_answer(
-        callback
-    )
-
-    user = await get_user(
-        callback.from_user.id
-    )
-
-    if user is None:
-        return
-
-    new_value = not user.auto_signals
-
-    await update_user(
-        callback.from_user.id,
-        auto_signals=new_value,
-    )
-
-    await safe_edit(
-        callback.message,
-        (
-            "🤖 <b>Автосигналы</b>\n\n"
-            f"Статус: "
-            f"{'🟢 ВКЛЮЧЕНЫ' if new_value else '🔴 ВЫКЛЮЧЕНЫ'}"
-        ),
-        main_keyboard(),
-    )
+        await safe_edit(
+            callback.message,
+            text,
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🔄 Новый сигнал",
+                            callback_data="signal",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="⬅️ Главное меню",
+                            callback_data="back_main",
+                        )
+                    ],
+                ]
+            ),
+        )
 
 
 # ============================================================
-# BACK
+# BACK MAIN
 # ============================================================
 
 @dp.callback_query(
@@ -1266,10 +1474,6 @@ async def back_main(
     await safe_callback_answer(
         callback
     )
-
-    USER_SELECTED_PAIRS[
-        callback.from_user.id
-    ] = "ANY"
 
     if callback.message:
 
@@ -1284,145 +1488,460 @@ async def back_main(
 
 
 # ============================================================
-# WINRATE
+# AUTO SIGNALS
 # ============================================================
 
-async def get_winrate_text():
+@dp.callback_query(
+    F.data == "auto_toggle"
+)
+async def auto_toggle(
+    callback: CallbackQuery,
+):
 
-    stats = await get_signal_stats()
+    global AUTO_SIGNALS
 
-    decided = stats["decided"]
-    wins = stats["wins"]
-    losses = stats["losses"]
-    winrate = stats["winrate"]
+    await safe_callback_answer(
+        callback
+    )
 
-    if decided < 30:
+    AUTO_SIGNALS = not AUTO_SIGNALS
 
-        return (
-            "📊 <b>РЕАЛЬНЫЙ WINRATE</b>\n\n"
-            f"✅ WIN: {wins}\n"
-            f"❌ LOSS: {losses}\n"
-            f"📦 Закрыто: {decided}\n\n"
-            "⏳ Недостаточно статистики для "
-            "надёжной оценки.\n"
-            "Ничего не подставляется искусственно."
+    try:
+
+        await update_user(
+            callback.from_user.id,
+            auto_signals=AUTO_SIGNALS,
         )
 
-    return (
-        "📊 <b>РЕАЛЬНЫЙ WINRATE</b>\n\n"
-        f"✅ WIN: {wins}\n"
-        f"❌ LOSS: {losses}\n"
-        f"📦 Закрыто: {decided}\n\n"
-        f"🎯 <b>WINRATE: {winrate:.1f}%</b>\n\n"
-        "Расчёт только по фактически "
-        "определённым WIN/LOSS."
+    except Exception as exc:
+
+        logger.warning(
+            "[AUTO] Failed to save setting: %s",
+            exc,
+        )
+
+    if callback.message:
+
+        await safe_edit(
+            callback.message,
+            (
+                "📈 <b>POCKET SIGNAL BOT</b>\n\n"
+                "Настройки обновлены."
+            ),
+            main_keyboard(),
+        )
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+@dp.callback_query(
+    F.data == "settings"
+)
+async def settings_handler(
+    callback: CallbackQuery,
+):
+
+    await safe_callback_answer(
+        callback
+    )
+
+    if not callback.message:
+
+        return
+
+    try:
+
+        user = await get_user(
+            callback.from_user.id
+        )
+
+    except Exception:
+
+        user = None
+
+    if user:
+
+        timeframe = getattr(
+            user,
+            "timeframe",
+            None,
+        )
+
+        pair = getattr(
+            user,
+            "pair",
+            None,
+        )
+
+        auto = getattr(
+            user,
+            "auto_signals",
+            AUTO_SIGNALS,
+        )
+
+    else:
+
+        timeframe = None
+        pair = None
+        auto = AUTO_SIGNALS
+
+    pair_display = (
+        pair_name(pair)
+        if pair
+        else "Любая пара"
+    )
+
+    timeframe_display = (
+        f"{timeframe} мин"
+        if timeframe
+        else "Не задано"
+    )
+
+    await safe_edit(
+        callback.message,
+        (
+            "⚙️ <b>НАСТРОЙКИ</b>\n\n"
+            f"💱 <b>Пара:</b> {pair_display}\n"
+            f"⏱ <b>Время:</b> {timeframe_display}\n"
+            f"🔔 <b>Автосигналы:</b> "
+            f"{'ВКЛ' if auto else 'ВЫКЛ'}\n\n"
+            "Для ручного сигнала используйте "
+            "кнопку «📈 Сигнал»."
+        ),
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📈 Новый сигнал",
+                        callback_data="signal",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data="back_main",
+                    )
+                ],
+            ]
+        ),
     )
 
 
 # ============================================================
-# SETTLEMENT
+# SETTLE SIGNALS
 # ============================================================
 
 async def settle_pending_signals():
 
-    """
-    Определяет WIN/LOSS только по фактической цене
-    закрытой M1-свечи.
+    try:
 
-    probability вообще не используется.
-    """
+        pending = await get_pending_signals()
+
+    except Exception as exc:
+
+        logger.warning(
+            "[SETTLE] Failed to load pending signals: %s",
+            exc,
+        )
+
+        return
+
+    if not pending:
+
+        return
+
+    for signal in pending:
+
+        try:
+
+            close_time = utc_time(
+                signal.close_time
+            )
+
+            now = datetime.now(
+                timezone.utc
+            )
+
+            if now < close_time:
+
+                continue
+
+            candles = await market.candles(
+                signal.pair,
+                limit=100,
+            )
+
+            if not candles:
+
+                continue
+
+            close_price = (
+                candle_close_at_or_before(
+                    candles,
+                    close_time,
+                )
+            )
+
+            if close_price is None:
+
+                continue
+
+            await settle_signal_by_price(
+                signal.id,
+                close_price,
+            )
+
+            logger.info(
+                "[SETTLE] Signal %s settled at %.8f",
+                signal.id,
+                close_price,
+            )
+
+        except Exception as exc:
+
+            logger.exception(
+                "[SETTLE] Signal %s error: %s",
+                getattr(
+                    signal,
+                    "id",
+                    "?",
+                ),
+                exc,
+            )
+
+
+# ============================================================
+# AUTO SIGNAL LOOP
+# ============================================================
+
+async def auto_signal_loop():
+
+    logger.info(
+        "[AUTO] Auto signal loop started"
+    )
 
     while True:
 
         try:
 
-            if await ensure_market_ready():
+            if AUTO_SIGNALS:
 
-                pending = await get_pending_signals()
+                users = await get_access_users()
 
-                now = datetime.now(
-                    timezone.utc
-                )
+                if users:
 
-                for signal in pending:
+                    pairs = get_config_pairs()
 
-                    close_time = utc_time(
-                        signal.close_time
-                    )
+                    timeframes = get_config_timeframes()
 
-                    if close_time > now:
-                        continue
+                    # Автоматический режим использует
+                    # конфигурационный набор.
+                    #
+                    # Берём лучший сигнал среди пар
+                    # и доступных экспираций.
 
-                    if signal.entry_price is None:
-                        continue
+                    pair_symbols = [
+                        symbol
+                        for _, symbol
+                        in pairs
+                    ]
 
-                    try:
+                    # Используем отдельный технический
+                    # поиск без Telegram message.
+                    #
+                    # Здесь не вызываем scan_market(),
+                    # потому что ему нужен Message.
 
-                        # Берём достаточно большой диапазон,
-                        # чтобы найти именно свечу окончания
-                        # экспирации.
-                        candles = await market.candles(
-                            signal.pair,
-                            limit=max(
-                                100,
-                                int(
-                                    getattr(
-                                        config,
-                                        "MARKET_CANDLE_LIMIT",
-                                        1600,
-                                    )
-                                ),
-                            ),
-                        )
+                    best_signal = None
 
-                        if not candles:
-                            continue
+                    for pair in pair_symbols:
 
-                        close_price = candle_close_at_or_before(
-                            candles,
-                            close_time,
-                        )
+                        try:
 
-                        if close_price is None:
+                            candle_limit = int(
+                                getattr(
+                                    config,
+                                    "MARKET_CANDLE_LIMIT",
+                                    1600,
+                                )
+                            )
+
+                        except (
+                            TypeError,
+                            ValueError,
+                        ):
+
+                            candle_limit = 1600
+
+                        try:
+
+                            candles = await market.candles(
+                                pair,
+                                limit=candle_limit,
+                            )
+
+                        except Exception as exc:
 
                             logger.warning(
-                                "[RESULT] Нет закрытой M1-свечи "
-                                "для signal=%s close=%s",
-                                signal.id,
-                                close_time,
+                                "[AUTO] candles %s: %s",
+                                pair,
+                                exc,
                             )
 
                             continue
 
-                        result = await settle_signal_by_price(
-                            signal.id,
-                            close_price,
-                        )
+                        if not candles:
 
-                        if result is None:
-
-                            # Ничья или сигнал ещё нельзя закрыть.
                             continue
 
-                        logger.info(
-                            "[RESULT] signal=%s pair=%s "
-                            "direction=%s entry=%s "
-                            "close=%s result=%s",
-                            signal.id,
-                            signal.pair,
-                            signal.direction,
-                            signal.entry_price,
-                            close_price,
-                            result,
-                        )
+                        for timeframe in timeframes:
 
-                    except Exception as exc:
+                            try:
 
-                        logger.exception(
-                            "[RESULT] Ошибка signal=%s: %s",
-                            signal.id,
-                            exc,
-                        )
+                                candidate = engine.analyze(
+                                    pair,
+                                    timeframe,
+                                    candles,
+                                )
+
+                            except Exception as exc:
+
+                                logger.warning(
+                                    "[AUTO] analyze %s/%s: %s",
+                                    pair,
+                                    timeframe,
+                                    exc,
+                                )
+
+                                continue
+
+                            if candidate is None:
+
+                                continue
+
+                            if best_signal is None:
+
+                                best_signal = candidate
+
+                                continue
+
+                            try:
+
+                                candidate_key = (
+                                    float(
+                                        getattr(
+                                            candidate,
+                                            "quality",
+                                            0.0,
+                                        )
+                                    ),
+                                    float(
+                                        getattr(
+                                            candidate,
+                                            "probability",
+                                            0.0,
+                                        )
+                                    ),
+                                )
+
+                            except Exception:
+
+                                candidate_key = (
+                                    0.0,
+                                    0.0,
+                                )
+
+                            try:
+
+                                best_key = (
+                                    float(
+                                        getattr(
+                                            best_signal,
+                                            "quality",
+                                            0.0,
+                                        )
+                                    ),
+                                    float(
+                                        getattr(
+                                            best_signal,
+                                            "probability",
+                                            0.0,
+                                        )
+                                    ),
+                                )
+
+                            except Exception:
+
+                                best_key = (
+                                    0.0,
+                                    0.0,
+                                )
+
+                            if candidate_key > best_key:
+
+                                best_signal = candidate
+
+                    if best_signal is not None:
+
+                        try:
+
+                            await save_signal(
+                                best_signal
+                            )
+
+                        except Exception as exc:
+
+                            logger.warning(
+                                "[AUTO] save error: %s",
+                                exc,
+                            )
+
+                        try:
+
+                            text = await format_signal(
+                                best_signal
+                            )
+
+                        except Exception as exc:
+
+                            logger.warning(
+                                "[AUTO] format error: %s",
+                                exc,
+                            )
+
+                            text = None
+
+                        if text:
+
+                            for user in users:
+
+                                try:
+
+                                    telegram_id = int(
+                                        getattr(
+                                            user,
+                                            "telegram_id",
+                                            0,
+                                        )
+                                    )
+
+                                    if not telegram_id:
+
+                                        continue
+
+                                    await bot.send_message(
+                                        telegram_id,
+                                        text,
+                                    )
+
+                                except Exception as exc:
+
+                                    logger.warning(
+                                        "[AUTO] send error: %s",
+                                        exc,
+                                    )
 
         except asyncio.CancelledError:
 
@@ -1431,12 +1950,46 @@ async def settle_pending_signals():
         except Exception as exc:
 
             logger.exception(
-                "[RESULT] Worker error: %s",
+                "[AUTO] Loop error: %s",
                 exc,
             )
 
         await asyncio.sleep(
-            10
+            60
+        )
+
+
+# ============================================================
+# SETTLEMENT LOOP
+# ============================================================
+
+async def settlement_loop():
+
+    logger.info(
+        "[SETTLE] Settlement loop started"
+    )
+
+    while True:
+
+        try:
+
+            if market_is_connected():
+
+                await settle_pending_signals()
+
+        except asyncio.CancelledError:
+
+            raise
+
+        except Exception as exc:
+
+            logger.exception(
+                "[SETTLE] Loop error: %s",
+                exc,
+            )
+
+        await asyncio.sleep(
+            30
         )
 
 
@@ -1446,11 +1999,35 @@ async def settle_pending_signals():
 
 async def on_startup():
 
-    await init_db()
-
     logger.info(
-        "🚀 POCKET_SIGNAL_BOT запущен"
+        "🚀 POCKET_SIGNAL_BOT starting..."
     )
+
+    try:
+
+        await init_db()
+
+        logger.info(
+            "✅ Database initialized"
+        )
+
+    except Exception as exc:
+
+        logger.exception(
+            "❌ Database initialization failed: %s",
+            exc,
+        )
+
+    try:
+
+        await ensure_market_ready()
+
+    except Exception as exc:
+
+        logger.exception(
+            "Market startup error: %s",
+            exc,
+        )
 
 
 # ============================================================
@@ -1459,35 +2036,36 @@ async def on_startup():
 
 async def on_shutdown():
 
-    try:
-
-        await market.close()
-
-    except Exception:
-
-        pass
-
-    await close_database()
+    logger.info(
+        "🛑 POCKET_SIGNAL_BOT shutting down..."
+    )
 
     try:
 
-        await bot.session.close()
+        await close_database()
 
-    except Exception:
+    except Exception as exc:
 
-        pass
+        logger.warning(
+            "Database shutdown error: %s",
+            exc,
+        )
 
 
 # ============================================================
-# BOT
+# BOT RUNNER
 # ============================================================
 
-async def bot_runner():
+async def run_bot():
 
     await on_startup()
 
-    result_worker = asyncio.create_task(
-        settle_pending_signals()
+    auto_task = asyncio.create_task(
+        auto_signal_loop()
+    )
+
+    settlement_task = asyncio.create_task(
+        settlement_loop()
     )
 
     try:
@@ -1498,24 +2076,23 @@ async def bot_runner():
 
     finally:
 
-        result_worker.cancel()
+        auto_task.cancel()
+        settlement_task.cancel()
 
-        try:
-
-            await result_worker
-
-        except asyncio.CancelledError:
-
-            pass
+        await asyncio.gather(
+            auto_task,
+            settlement_task,
+            return_exceptions=True,
+        )
 
         await on_shutdown()
 
 
 # ============================================================
-# WEB
+# WEB SERVER
 # ============================================================
 
-async def web_runner():
+def run_web():
 
     port = int(
         os.getenv(
@@ -1524,28 +2101,21 @@ async def web_runner():
         )
     )
 
-    server = uvicorn.Server(
-        uvicorn.Config(
-            app,
-            host="0.0.0.0",
-            port=port,
-            log_level="info",
-        )
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
     )
-
-    await server.serve()
 
 
 # ============================================================
-# MAIN
+# ENTRYPOINT
 # ============================================================
 
 async def main():
 
-    await asyncio.gather(
-        bot_runner(),
-        web_runner(),
-    )
+    await run_bot()
 
 
 if __name__ == "__main__":
