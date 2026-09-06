@@ -12,20 +12,10 @@ from zoneinfo import ZoneInfo
 
 import uvicorn
 
-from aiogram import (
-    Bot,
-    Dispatcher,
-    F,
-)
-
-from aiogram.client.default import (
-    DefaultBotProperties,
-)
-
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-
 from aiogram.filters import CommandStart
-
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -43,7 +33,6 @@ from database import (
     get_access_users,
     get_pair_stats,
     get_pending_signals,
-    get_signal_stats,
     get_user,
     init_db,
     save_signal,
@@ -69,18 +58,14 @@ logging.basicConfig(
     ),
 )
 
-logger = logging.getLogger(
-    "POCKET_SIGNAL_BOT"
-)
+logger = logging.getLogger("POCKET_SIGNAL_BOT")
 
 
 # ============================================================
 # TIMEZONE
 # ============================================================
 
-MSK = ZoneInfo(
-    "Europe/Moscow"
-)
+MSK = ZoneInfo("Europe/Moscow")
 
 
 # ============================================================
@@ -109,15 +94,9 @@ MARKET_READY = False
 
 MARKET_CONNECT_LOCK = asyncio.Lock()
 
-USER_ANALYSIS_LOCKS: dict[
-    int,
-    asyncio.Lock,
-] = {}
+USER_ANALYSIS_LOCKS: dict[int, asyncio.Lock] = {}
 
-USER_SELECTED_PAIRS: dict[
-    int,
-    str,
-] = {}
+USER_SELECTED_PAIRS: dict[int, str] = {}
 
 
 # ============================================================
@@ -131,7 +110,6 @@ app = FastAPI(
 
 @app.get("/")
 async def root():
-
     return {
         "status": "ok",
         "service": "POCKET_SIGNAL_BOT",
@@ -141,14 +119,11 @@ async def root():
 
 @app.get("/health")
 async def health():
-
     return {
         "status": "healthy",
         "service": "POCKET_SIGNAL_BOT",
         "market_connected": market_is_connected(),
-        "time": datetime.now(
-            timezone.utc
-        ).isoformat(),
+        "time": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -157,7 +132,6 @@ async def health():
 # ============================================================
 
 def market_is_connected() -> bool:
-
     return bool(
         getattr(
             market,
@@ -173,25 +147,19 @@ def market_is_connected() -> bool:
 
 
 async def ensure_market_ready() -> bool:
-
     global MARKET_READY
 
     if market_is_connected():
-
         MARKET_READY = True
-
         return True
 
     async with MARKET_CONNECT_LOCK:
 
         if market_is_connected():
-
             MARKET_READY = True
-
             return True
 
         try:
-
             logger.info(
                 "[MARKET] Подключение к источнику рынка..."
             )
@@ -199,15 +167,11 @@ async def ensure_market_ready() -> bool:
             connected = await market.connect()
 
             if not connected:
-
                 MARKET_READY = False
-
                 return False
 
             if not market_is_connected():
-
                 MARKET_READY = False
-
                 return False
 
             MARKET_READY = True
@@ -219,7 +183,6 @@ async def ensure_market_ready() -> bool:
             return True
 
         except Exception as exc:
-
             MARKET_READY = False
 
             logger.exception(
@@ -235,7 +198,6 @@ async def ensure_market_ready() -> bool:
 # ============================================================
 
 def get_config_pairs():
-
     pairs = getattr(
         config,
         "pairs",
@@ -243,7 +205,6 @@ def get_config_pairs():
     )
 
     if not pairs:
-
         raise RuntimeError(
             "В config.py отсутствует pairs."
         )
@@ -252,7 +213,6 @@ def get_config_pairs():
 
 
 def get_config_timeframes():
-
     values = getattr(
         config,
         "timeframes",
@@ -260,7 +220,6 @@ def get_config_timeframes():
     )
 
     if not values:
-
         raise RuntimeError(
             "В config.py отсутствует timeframes."
         )
@@ -270,24 +229,18 @@ def get_config_timeframes():
     for value in values:
 
         try:
-
             timeframe = int(value)
 
         except (
             TypeError,
             ValueError,
         ):
-
             continue
 
         if timeframe > 0:
-
-            result.append(
-                timeframe
-            )
+            result.append(timeframe)
 
     if not result:
-
         raise RuntimeError(
             "В config.py нет корректных timeframes."
         )
@@ -295,14 +248,10 @@ def get_config_timeframes():
     return result
 
 
-def pair_name(
-    symbol: str,
-) -> str:
-
+def pair_name(symbol: str) -> str:
     for name, internal in get_config_pairs():
 
         if internal == symbol:
-
             return name
 
     return symbol
@@ -312,13 +261,8 @@ def pair_name(
 # DIRECTION
 # ============================================================
 
-def direction_text(
-    direction: str,
-) -> str:
-
-    value = str(
-        direction
-    ).upper()
+def direction_text(direction: str) -> str:
+    value = str(direction).upper()
 
     if value in {
         "UP",
@@ -327,7 +271,6 @@ def direction_text(
         "ВВЕРХ",
         "ВЫШЕ",
     }:
-
         return "🟢 ВВЕРХ"
 
     if value in {
@@ -337,7 +280,6 @@ def direction_text(
         "ВНИЗ",
         "НИЖЕ",
     }:
-
         return "🔴 ВНИЗ"
 
     return value
@@ -347,12 +289,9 @@ def direction_text(
 # TIME
 # ============================================================
 
-def utc_time(
-    value: datetime,
-) -> datetime:
+def utc_time(value: datetime) -> datetime:
 
     if value.tzinfo is None:
-
         return value.replace(
             tzinfo=timezone.utc
         )
@@ -362,9 +301,7 @@ def utc_time(
     )
 
 
-def msk_time(
-    value: datetime,
-) -> str:
+def msk_time(value: datetime) -> str:
 
     return utc_time(
         value
@@ -385,7 +322,6 @@ def candle_close_at_or_before(
 ) -> float | None:
 
     if not candles:
-
         return None
 
     target_time = utc_time(
@@ -402,19 +338,13 @@ def candle_close_at_or_before(
 
         candle_close = (
             candle_start
-            + timedelta(
-                minutes=1
-            )
+            + timedelta(minutes=1)
         )
 
         if candle_close <= target_time:
-
-            valid.append(
-                candle
-            )
+            valid.append(candle)
 
     if not valid:
-
         return None
 
     candle = max(
@@ -444,7 +374,6 @@ async def pair_history_text(
         for item in stats:
 
             if item["pair"] != pair:
-
                 continue
 
             decided = (
@@ -453,7 +382,6 @@ async def pair_history_text(
             )
 
             if decided <= 0:
-
                 break
 
             return (
@@ -498,6 +426,52 @@ async def format_signal(
         signal.pair
     )
 
+    # ========================================================
+    # ТОЧНОЕ ВРЕМЯ ВХОДА
+    # ========================================================
+    #
+    # signal.entry_time формируется в signals.py.
+    #
+    # Здесь НЕ должно быть:
+    #
+    #     ПО ЗАЯВКЕ
+    #
+    # Вместо этого выводим конкретное время.
+    #
+    # ========================================================
+
+    entry_time = getattr(
+        signal,
+        "entry_time",
+        None,
+    )
+
+    close_time = getattr(
+        signal,
+        "close_time",
+        None,
+    )
+
+    if isinstance(
+        entry_time,
+        datetime,
+    ):
+        entry_text = (
+            f"{msk_time(entry_time)} МСК"
+        )
+    else:
+        entry_text = "—"
+
+    if isinstance(
+        close_time,
+        datetime,
+    ):
+        close_text = (
+            f"{msk_time(close_time)} МСК"
+        )
+    else:
+        close_text = "—"
+
     text = (
         "📈 <b>СИЛЬНЫЙ OTC-СИГНАЛ</b>\n\n"
 
@@ -516,10 +490,11 @@ async def format_signal(
         f"⭐ <b>Quality Score:</b> "
         f"{float(signal.quality):.1f}/100\n\n"
 
-        "🕐 <b>Вход:</b> ПО ЗАЯВКЕ\n"
+        f"🕐 <b>Вход:</b> "
+        f"{entry_text}\n"
 
         f"⏰ <b>Закрытие:</b> "
-        f"{msk_time(signal.close_time)} МСК\n\n"
+        f"{close_text}\n\n"
 
         f"{history}"
     )
@@ -600,12 +575,10 @@ def signal_pair_keyboard():
         )
 
         if len(row) == 2:
-
             rows.append(row)
             row = []
 
     if row:
-
         rows.append(row)
 
     rows.append(
@@ -641,12 +614,10 @@ def signal_time_keyboard():
         )
 
         if len(row) == 3:
-
             rows.append(row)
             row = []
 
     if row:
-
         rows.append(row)
 
     rows.append(
@@ -821,7 +792,6 @@ async def signal_pair(
     )
 
     if not callback.message:
-
         return
 
     user_id = callback.from_user.id
@@ -881,7 +851,6 @@ async def scan_market(
     )
 
     if total <= 0:
-
         return None
 
     checked = 0
@@ -902,12 +871,10 @@ async def scan_market(
 
         now = time.monotonic()
 
-        # Не отправляем Telegram сотни edit подряд.
         if (
             not force
             and now - last_progress_update < 0.8
         ):
-
             return
 
         last_progress_update = now
@@ -1056,7 +1023,6 @@ async def scan_market(
                 signal = None
 
             if signal is None:
-
                 continue
 
             try:
@@ -1143,8 +1109,6 @@ async def scan_market(
 
                     best_probability = 0.0
 
-                # Сначала Quality Score.
-                # При равном качестве — техническая уверенность.
                 if (
                     quality,
                     probability,
@@ -1189,7 +1153,6 @@ async def signal_time(
     )
 
     if not callback.message:
-
         return
 
     user_id = callback.from_user.id
@@ -1207,30 +1170,14 @@ async def signal_time(
     )
 
     # ========================================================
-    # ГЛАВНОЕ ИСПРАВЛЕНИЕ
-    # ========================================================
-    #
-    # Раньше:
-    #
-    #   ANY -> взять user.timeframe
-    #
-    # Поэтому если у пользователя было сохранено 20,
-    # кнопка "ЛЮБОЕ ВРЕМЯ" фактически превращалась
-    # в "20 минут".
-    #
-    # Теперь:
-    #
-    #   ANY -> ВСЕ timeframe из config.timeframes
-    #
+    # ANY TIME = ALL TIMEFRAMES
     # ========================================================
 
     if timeframe_raw == "ANY":
 
         timeframes = get_config_timeframes()
 
-        time_label = (
-            "ЛЮБОЕ ВРЕМЯ"
-        )
+        time_label = "ЛЮБОЕ ВРЕМЯ"
 
         timeframes_label = ", ".join(
             f"{x} мин"
@@ -1316,10 +1263,6 @@ async def signal_time(
 
     async with lock:
 
-        # ----------------------------------------------------
-        # INITIAL SCREEN
-        # ----------------------------------------------------
-
         await safe_edit(
             callback.message,
             (
@@ -1333,10 +1276,6 @@ async def signal_time(
                 "🔌 Подключение к рынку..."
             ),
         )
-
-        # ----------------------------------------------------
-        # SCAN
-        # ----------------------------------------------------
 
         try:
 
@@ -1364,20 +1303,13 @@ async def signal_time(
 
             return
 
-        # ----------------------------------------------------
-        # NO SIGNAL
-        # ----------------------------------------------------
-
         if signal is None:
 
             if timeframe_raw == "ANY":
-
                 checked_timeframes = (
                     timeframes_label
                 )
-
             else:
-
                 checked_timeframes = (
                     f"{timeframes[0]} мин"
                 )
@@ -1413,10 +1345,6 @@ async def signal_time(
 
             return
 
-        # ----------------------------------------------------
-        # SAVE SIGNAL
-        # ----------------------------------------------------
-
         try:
 
             await save_signal(
@@ -1429,10 +1357,6 @@ async def signal_time(
                 "[SIGNAL] Save error: %s",
                 exc,
             )
-
-        # ----------------------------------------------------
-        # FINAL SIGNAL
-        # ----------------------------------------------------
 
         text = await format_signal(
             signal
@@ -1548,7 +1472,6 @@ async def settings_handler(
     )
 
     if not callback.message:
-
         return
 
     try:
@@ -1649,7 +1572,6 @@ async def settle_pending_signals():
         return
 
     if not pending:
-
         return
 
     for signal in pending:
@@ -1665,7 +1587,6 @@ async def settle_pending_signals():
             )
 
             if now < close_time:
-
                 continue
 
             candles = await market.candles(
@@ -1674,7 +1595,6 @@ async def settle_pending_signals():
             )
 
             if not candles:
-
                 continue
 
             close_price = (
@@ -1685,7 +1605,6 @@ async def settle_pending_signals():
             )
 
             if close_price is None:
-
                 continue
 
             await settle_signal_by_price(
@@ -1736,23 +1655,11 @@ async def auto_signal_loop():
 
                     timeframes = get_config_timeframes()
 
-                    # Автоматический режим использует
-                    # конфигурационный набор.
-                    #
-                    # Берём лучший сигнал среди пар
-                    # и доступных экспираций.
-
                     pair_symbols = [
                         symbol
                         for _, symbol
                         in pairs
                     ]
-
-                    # Используем отдельный технический
-                    # поиск без Telegram message.
-                    #
-                    # Здесь не вызываем scan_market(),
-                    # потому что ему нужен Message.
 
                     best_signal = None
 
@@ -1793,7 +1700,6 @@ async def auto_signal_loop():
                             continue
 
                         if not candles:
-
                             continue
 
                         for timeframe in timeframes:
@@ -1818,13 +1724,11 @@ async def auto_signal_loop():
                                 continue
 
                             if candidate is None:
-
                                 continue
 
                             if best_signal is None:
 
                                 best_signal = candidate
-
                                 continue
 
                             try:
@@ -1928,7 +1832,6 @@ async def auto_signal_loop():
                                     )
 
                                     if not telegram_id:
-
                                         continue
 
                                     await bot.send_message(
