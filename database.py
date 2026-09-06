@@ -35,6 +35,10 @@ logger = logging.getLogger(
 )
 
 
+# ============================================================
+# DATABASE ENGINE
+# ============================================================
+
 engine = create_async_engine(
     config.database_url,
     pool_pre_ping=True,
@@ -48,9 +52,17 @@ Session = async_sessionmaker(
 )
 
 
+# ============================================================
+# BASE
+# ============================================================
+
 class Base(DeclarativeBase):
     pass
 
+
+# ============================================================
+# USER
+# ============================================================
 
 class User(Base):
 
@@ -65,6 +77,7 @@ class User(Base):
         BigInteger,
         unique=True,
         index=True,
+        nullable=False,
     )
 
     username: Mapped[Optional[str]] = mapped_column(
@@ -80,33 +93,66 @@ class User(Base):
     pair: Mapped[str] = mapped_column(
         String(64),
         default="ANY",
+        nullable=False,
     )
 
     timeframe: Mapped[int] = mapped_column(
         Integer,
         default=5,
+        nullable=False,
     )
 
     auto_signals: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
+        nullable=False,
     )
 
     access: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
+        nullable=False,
     )
 
     blocked: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
+        nullable=False,
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
+        nullable=False,
     )
 
+    # --------------------------------------------------------
+    # LAST SEEN
+    # --------------------------------------------------------
+    #
+    # В текущей PostgreSQL базе эта колонка уже существует
+    # и имеет NOT NULL.
+    #
+    # Раньше модель User её не содержала, из-за чего INSERT
+    # нового пользователя завершался:
+    #
+    # NotNullViolationError:
+    # null value in column "last_seen"
+    #
+    # Теперь поле есть и будет автоматически обновляться
+    # при каждом вызове ensure_user().
+    #
+
+    last_seen: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+# ============================================================
+# SIGNAL
+# ============================================================
 
 class Signal(Base):
 
@@ -119,35 +165,43 @@ class Signal(Base):
 
     pair: Mapped[str] = mapped_column(
         String(64),
+        nullable=False,
     )
 
     timeframe: Mapped[int] = mapped_column(
         Integer,
+        nullable=False,
     )
 
     direction: Mapped[str] = mapped_column(
         String(8),
+        nullable=False,
     )
 
     probability: Mapped[float] = mapped_column(
         Float,
+        nullable=False,
     )
 
     quality: Mapped[float] = mapped_column(
         Float,
+        nullable=False,
     )
 
     entry_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        nullable=False,
     )
 
     close_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        nullable=False,
     )
 
     status: Mapped[str] = mapped_column(
         String(16),
         default="PENDING",
+        nullable=False,
     )
 
     result: Mapped[Optional[str]] = mapped_column(
@@ -158,51 +212,248 @@ class Signal(Base):
     reasons: Mapped[str] = mapped_column(
         Text,
         default="[]",
+        nullable=False,
     )
 
 
+# ============================================================
+# INIT DATABASE
+# ============================================================
+
 async def init_db():
 
+    logger.info(
+        "[DATABASE] Инициализация PostgreSQL..."
+    )
+
     async with engine.begin() as connection:
+
+        # ----------------------------------------------------
+        # CREATE TABLES
+        # ----------------------------------------------------
 
         await connection.run_sync(
             Base.metadata.create_all
         )
 
-        # Исправление старого INTEGER Telegram ID.
+        # ----------------------------------------------------
+        # POSTGRESQL MIGRATIONS
+        # ----------------------------------------------------
+
         if "postgresql" in config.database_url:
 
-            await connection.exec_driver_sql(
-                """
-                DO $$
-                BEGIN
+            # =================================================
+            # TELEGRAM ID -> BIGINT
+            # =================================================
 
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_name = 'users'
-                        AND column_name = 'telegram_id'
-                        AND data_type <> 'bigint'
-                    ) THEN
+            try:
 
+                await connection.exec_driver_sql(
+                    """
+                    DO $$
+                    BEGIN
+
+                        IF EXISTS (
+                            SELECT 1
+                            FROM information_schema.columns
+                            WHERE table_name = 'users'
+                            AND column_name = 'telegram_id'
+                            AND data_type <> 'bigint'
+                        ) THEN
+
+                            ALTER TABLE users
+                            ALTER COLUMN telegram_id
+                            TYPE BIGINT
+                            USING telegram_id::BIGINT;
+
+                        END IF;
+
+                    END
+                    $$;
+                    """
+                )
+
+            except Exception as exc:
+
+                logger.warning(
+                    "[DATABASE] Не удалось проверить "
+                    "telegram_id: %s",
+                    exc,
+                )
+
+            # =================================================
+            # LAST_SEEN
+            # =================================================
+
+            try:
+
+                # ------------------------------------------------
+                # Проверяем, существует ли last_seen
+                # ------------------------------------------------
+
+                result = await connection.exec_driver_sql(
+                    """
+                    SELECT
+                        column_name,
+                        is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                    AND table_name = 'users'
+                    AND column_name = 'last_seen'
+                    """
+                )
+
+                row = result.first()
+
+                # ------------------------------------------------
+                # Если колонки нет — создаём
+                # ------------------------------------------------
+
+                if row is None:
+
+                    logger.warning(
+                        "[DATABASE] Колонка users.last_seen "
+                        "отсутствует. Создаю..."
+                    )
+
+                    await connection.exec_driver_sql(
+                        """
                         ALTER TABLE users
-                        ALTER COLUMN telegram_id
-                        TYPE BIGINT
-                        USING telegram_id::BIGINT;
+                        ADD COLUMN last_seen
+                        TIMESTAMP WITH TIME ZONE;
+                        """
+                    )
 
-                    END IF;
+                    # --------------------------------------------
+                    # Заполняем существующие записи
+                    # --------------------------------------------
 
-                END
-                $$;
-                """
-            )
+                    await connection.exec_driver_sql(
+                        """
+                        UPDATE users
+                        SET last_seen = COALESCE(
+                            created_at,
+                            NOW()
+                        )
+                        WHERE last_seen IS NULL;
+                        """
+                    )
 
+                    # --------------------------------------------
+                    # Устанавливаем default
+                    # --------------------------------------------
+
+                    await connection.exec_driver_sql(
+                        """
+                        ALTER TABLE users
+                        ALTER COLUMN last_seen
+                        SET DEFAULT NOW();
+                        """
+                    )
+
+                    # --------------------------------------------
+                    # Теперь делаем NOT NULL
+                    # --------------------------------------------
+
+                    await connection.exec_driver_sql(
+                        """
+                        ALTER TABLE users
+                        ALTER COLUMN last_seen
+                        SET NOT NULL;
+                        """
+                    )
+
+                    logger.info(
+                        "[DATABASE] ✅ users.last_seen "
+                        "создан и настроен."
+                    )
+
+                else:
+
+                    # ------------------------------------------------
+                    # Колонка уже существует
+                    # ------------------------------------------------
+
+                    logger.info(
+                        "[DATABASE] users.last_seen "
+                        "уже существует."
+                    )
+
+                    # --------------------------------------------
+                    # Исправляем NULL, если такие есть
+                    # --------------------------------------------
+
+                    await connection.exec_driver_sql(
+                        """
+                        UPDATE users
+                        SET last_seen = COALESCE(
+                            created_at,
+                            NOW()
+                        )
+                        WHERE last_seen IS NULL;
+                        """
+                    )
+
+                    # --------------------------------------------
+                    # Ставим DEFAULT
+                    # --------------------------------------------
+
+                    await connection.exec_driver_sql(
+                        """
+                        ALTER TABLE users
+                        ALTER COLUMN last_seen
+                        SET DEFAULT NOW();
+                        """
+                    )
+
+                    # --------------------------------------------
+                    # Убеждаемся, что NOT NULL установлен
+                    # --------------------------------------------
+
+                    if row.is_nullable == "YES":
+
+                        await connection.exec_driver_sql(
+                            """
+                            ALTER TABLE users
+                            ALTER COLUMN last_seen
+                            SET NOT NULL;
+                            """
+                        )
+
+                        logger.info(
+                            "[DATABASE] "
+                            "users.last_seen установлен "
+                            "как NOT NULL."
+                        )
+
+            except Exception as exc:
+
+                logger.exception(
+                    "[DATABASE] ❌ Ошибка миграции "
+                    "users.last_seen: %s",
+                    exc,
+                )
+
+                raise
+
+    logger.info(
+        "[DATABASE] ✅ PostgreSQL готов."
+    )
+
+
+# ============================================================
+# ENSURE USER
+# ============================================================
 
 async def ensure_user(
     telegram_id: int,
     username: str | None,
     first_name: str | None,
 ) -> User:
+
+    now = datetime.now(
+        timezone.utc
+    )
 
     async with Session() as session:
 
@@ -214,7 +465,17 @@ async def ensure_user(
             )
         ).scalar_one_or_none()
 
+        # ====================================================
+        # NEW USER
+        # ====================================================
+
         if user is None:
+
+            logger.info(
+                "[DATABASE] Создаю нового пользователя "
+                "telegram_id=%s",
+                telegram_id,
+            )
 
             user = User(
                 telegram_id=telegram_id,
@@ -225,19 +486,30 @@ async def ensure_user(
                 auto_signals=True,
                 access=True,
                 blocked=False,
+                created_at=now,
+                last_seen=now,
             )
 
             session.add(user)
+
+        # ====================================================
+        # EXISTING USER
+        # ====================================================
 
         else:
 
             user.username = username
             user.first_name = first_name
+            user.last_seen = now
 
         await session.commit()
 
         return user
 
+
+# ============================================================
+# GET USER
+# ============================================================
 
 async def get_user(
     telegram_id: int,
@@ -253,6 +525,10 @@ async def get_user(
             )
         ).scalar_one_or_none()
 
+
+# ============================================================
+# UPDATE USER
+# ============================================================
 
 async def update_user(
     telegram_id: int,
@@ -274,7 +550,10 @@ async def update_user(
 
         for key, value in values.items():
 
-            if hasattr(user, key):
+            if hasattr(
+                user,
+                key,
+            ):
 
                 setattr(
                     user,
@@ -282,8 +561,17 @@ async def update_user(
                     value,
                 )
 
+        # Обновляем last_seen при изменении пользователя
+        user.last_seen = datetime.now(
+            timezone.utc
+        )
+
         await session.commit()
 
+
+# ============================================================
+# GET ACCESS USERS
+# ============================================================
 
 async def get_access_users() -> list[User]:
 
@@ -300,6 +588,10 @@ async def get_access_users() -> list[User]:
             result.scalars().all()
         )
 
+
+# ============================================================
+# SAVE SIGNAL
+# ============================================================
 
 async def save_signal(
     pair: str,
@@ -337,20 +629,23 @@ async def save_signal(
         return signal.id
 
 
+# ============================================================
+# MARK EXPIRED SIGNALS
+# ============================================================
+
 async def mark_expired_signals():
 
     """
     Переводит истёкшие PENDING сигналы в EXPIRED.
 
-    WIN/LOSS здесь специально не придумываем:
-    для настоящего результата необходимо сравнить
-    цену закрытия с направлением сигнала.
-
-    Пока EXPIRED используется как состояние,
-    чтобы один и тот же сигнал не обрабатывался повторно.
+    WIN/LOSS здесь не определяется.
+    Для WIN/LOSS необходимо сравнение направления
+    сигнала с фактической ценой закрытия.
     """
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(
+        timezone.utc
+    )
 
     async with Session() as session:
 
@@ -374,6 +669,10 @@ async def mark_expired_signals():
         return len(signals)
 
 
+# ============================================================
+# SET SIGNAL RESULT
+# ============================================================
+
 async def set_signal_result(
     signal_id: int,
     result: str,
@@ -385,6 +684,7 @@ async def set_signal_result(
         "WIN",
         "LOSS",
     }:
+
         raise ValueError(
             "Результат должен быть WIN или LOSS."
         )
@@ -406,6 +706,10 @@ async def set_signal_result(
 
         return True
 
+
+# ============================================================
+# SIGNAL STATS
+# ============================================================
 
 async def get_signal_stats():
 
@@ -442,7 +746,9 @@ async def get_signal_stats():
             or 0
         )
 
-        decided = wins + losses
+        decided = (
+            wins + losses
+        )
 
         winrate = (
             wins / decided * 100
@@ -458,6 +764,10 @@ async def get_signal_stats():
             "decided": decided,
         }
 
+
+# ============================================================
+# USER STATS
+# ============================================================
 
 async def get_user_stats():
 
@@ -502,6 +812,10 @@ async def get_user_stats():
         }
 
 
+# ============================================================
+# RECENT SIGNALS
+# ============================================================
+
 async def get_recent_signals(
     limit: int = 10,
 ):
@@ -529,6 +843,10 @@ async def get_recent_signals(
         )
 
 
+# ============================================================
+# PAIR STATS
+# ============================================================
+
 async def get_pair_stats():
 
     async with Session() as session:
@@ -551,6 +869,14 @@ async def get_pair_stats():
         return result.all()
 
 
+# ============================================================
+# CLOSE DATABASE
+# ============================================================
+
 async def close_database():
 
     await engine.dispose()
+
+    logger.info(
+        "[DATABASE] Database connection closed."
+    )
