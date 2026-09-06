@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import os
 import shutil
@@ -18,8 +17,10 @@ logger = logging.getLogger("pocket_market")
 
 
 # ============================================================
-# TIMEOUTS
+# CONSTANTS
 # ============================================================
+
+LOGIN_URL = "https://pocketoption.com/en/login/"
 
 CONNECT_TIMEOUT = 90
 AUTO_LOGIN_TIMEOUT = 150
@@ -30,11 +31,13 @@ PLAYWRIGHT_PREPARE_TIMEOUT = 60
 
 WEBSOCKET_INIT_DELAY = 5
 
-RUNTIME_PLAYWRIGHT_PATH = "/tmp/pocket-option-ms-playwright"
+RUNTIME_PLAYWRIGHT_PATH = (
+    "/tmp/pocket-option-ms-playwright"
+)
 
 
 # ============================================================
-# CANDLE MODEL
+# CANDLE
 # ============================================================
 
 @dataclass
@@ -48,34 +51,12 @@ class Candle:
 
 
 # ============================================================
-# ENV HELPERS
-# ============================================================
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-
-    if value is None:
-        return default
-
-    return value.strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
-    }
-
-
-# ============================================================
-# PLAYWRIGHT
+# PLAYWRIGHT SOURCES
 # ============================================================
 
 def _find_browser_executable(
     base_paths: list[Path],
 ) -> Optional[str]:
-    """
-    Ищет Chromium/Chrome в указанных директориях.
-    """
 
     executable_names = (
         "chrome",
@@ -85,24 +66,37 @@ def _find_browser_executable(
     )
 
     for base in base_paths:
+
         if not base.exists():
             continue
 
         try:
+
             for name in executable_names:
+
                 for path in base.rglob(name):
+
                     try:
-                        if path.is_file() and os.access(
-                            path,
-                            os.X_OK,
+
+                        if (
+                            path.is_file()
+                            and os.access(
+                                path,
+                                os.X_OK,
+                            )
                         ):
-                            return str(path.resolve())
+                            return str(
+                                path.resolve()
+                            )
+
                     except Exception:
                         continue
 
         except Exception:
+
             logger.exception(
-                "[PLAYWRIGHT] Ошибка поиска браузера: %s",
+                "[PLAYWRIGHT] "
+                "Ошибка поиска браузера: %s",
                 base,
             )
 
@@ -110,10 +104,6 @@ def _find_browser_executable(
 
 
 def _get_playwright_sources() -> list[Path]:
-    """
-    Все возможные места, где Render/Playwright
-    может хранить браузер.
-    """
 
     result: list[Path] = []
 
@@ -122,14 +112,18 @@ def _get_playwright_sources() -> list[Path]:
     )
 
     if custom:
-        result.append(Path(custom))
+        result.append(
+            Path(custom)
+        )
 
     env_path = os.getenv(
         "PLAYWRIGHT_BROWSERS_PATH"
     )
 
     if env_path:
-        result.append(Path(env_path))
+        result.append(
+            Path(env_path)
+        )
 
     result.extend(
         [
@@ -149,6 +143,7 @@ def _get_playwright_sources() -> list[Path]:
     seen: set[str] = set()
 
     for path in result:
+
         try:
             key = str(
                 path.expanduser().resolve()
@@ -166,10 +161,6 @@ def _get_playwright_sources() -> list[Path]:
 
 
 def prepare_playwright_environment() -> Optional[str]:
-    """
-    Находит установленный Chromium и при необходимости
-    копирует его в /tmp.
-    """
 
     runtime = Path(
         RUNTIME_PLAYWRIGHT_PATH
@@ -185,29 +176,24 @@ def prepare_playwright_environment() -> Optional[str]:
         runtime,
     )
 
-    # --------------------------------------------------------
-    # Уже есть браузер в runtime
-    # --------------------------------------------------------
-
     browser = _find_browser_executable(
         [runtime]
     )
 
     if browser:
+
         logger.info(
-            "[PLAYWRIGHT] Chromium уже есть в runtime: %s",
+            "[PLAYWRIGHT] "
+            "Chromium уже есть в runtime: %s",
             browser,
         )
 
         return browser
 
-    # --------------------------------------------------------
-    # Ищем browser source
-    # --------------------------------------------------------
-
     sources = _get_playwright_sources()
 
     for source in sources:
+
         logger.info(
             "[PLAYWRIGHT] Проверяю source: %s",
             source,
@@ -221,40 +207,44 @@ def prepare_playwright_environment() -> Optional[str]:
         )
 
         if not browser:
+
             logger.info(
-                "[PLAYWRIGHT] Chromium не найден: %s",
+                "[PLAYWRIGHT] "
+                "Chromium не найден: %s",
                 source,
             )
+
             continue
 
         logger.info(
-            "[PLAYWRIGHT] Найден Chromium в source: %s",
+            "[PLAYWRIGHT] "
+            "Найден Chromium в source: %s",
             browser,
         )
 
         try:
-            # ------------------------------------------------
-            # Очищаем runtime
-            # ------------------------------------------------
 
             if runtime.exists():
+
                 for item in runtime.iterdir():
+
                     try:
+
                         if item.is_dir():
+
                             shutil.rmtree(
                                 item,
                                 ignore_errors=True,
                             )
+
                         else:
+
                             item.unlink(
                                 missing_ok=True
                             )
+
                     except Exception:
                         pass
-
-            # ------------------------------------------------
-            # Копируем browser
-            # ------------------------------------------------
 
             shutil.copytree(
                 source,
@@ -262,304 +252,648 @@ def prepare_playwright_environment() -> Optional[str]:
                 dirs_exist_ok=True,
             )
 
-            runtime_browser = _find_browser_executable(
-                [runtime]
+            runtime_browser = (
+                _find_browser_executable(
+                    [runtime]
+                )
             )
 
             if runtime_browser:
+
                 logger.info(
-                    "[PLAYWRIGHT] Runtime Chromium: %s",
+                    "[PLAYWRIGHT] "
+                    "Runtime Chromium: %s",
                     runtime_browser,
                 )
 
                 return runtime_browser
 
         except Exception:
+
             logger.exception(
-                "[PLAYWRIGHT] Ошибка копирования Chromium."
+                "[PLAYWRIGHT] "
+                "Ошибка копирования Chromium."
             )
 
-            # Если копирование не удалось,
-            # возвращаем исходный путь.
             return browser
 
     logger.error(
-        "[PLAYWRIGHT] Рабочий Chromium не найден."
+        "[PLAYWRIGHT] "
+        "Рабочий Chromium не найден."
     )
 
     return None
 
 
 # ============================================================
-# POCKET OPTION LOGIN
+# COOKIE -> SSID
 # ============================================================
 
-def _pocket_login_sync(
+def _build_ssid_from_cookie(
+    session_value: str,
+    demo: bool,
+    uid: int = 0,
+) -> str:
+
+    is_demo = 1 if demo else 0
+
+    return (
+        '42["auth",'
+        '{"session":"'
+        + session_value
+        + '",'
+        '"isDemo":'
+        + str(is_demo)
+        + ","
+        '"uid":'
+        + str(uid)
+        + ","
+        '"platform":2'
+        "}]"
+    )
+
+
+# ============================================================
+# CUSTOM PLAYWRIGHT LOGIN
+# ============================================================
+
+def _browser_login_sync(
     email: str,
     password: str,
     browser_executable: str,
+    demo: bool,
 ) -> Optional[str]:
-    """
-    Синхронная функция авторизации Pocket Option.
-
-    Запускается через asyncio.to_thread(),
-    поэтому не создаёт дополнительный Python process
-    и не удваивает расход RAM на Render Free.
-    """
 
     logger.info(
-        "[AUTO LOGIN WORKER] Browser executable=%s",
-        browser_executable,
+        "[AUTO LOGIN] "
+        "Запускаю собственный Playwright login."
     )
 
     try:
-        login_module = importlib.import_module(
-            "BinaryOptionsToolsV2.pocketoption.tools.login"
+
+        from playwright.sync_api import (
+            TimeoutError as PlaywrightTimeoutError,
+        )
+
+        from playwright.sync_api import (
+            sync_playwright,
         )
 
     except Exception:
+
         logger.exception(
-            "[AUTO LOGIN WORKER] "
-            "Не удалось импортировать login module."
+            "[AUTO LOGIN] "
+            "Playwright не импортируется."
         )
 
         return None
 
-    original_browser_configs = getattr(
-        login_module,
-        "_browser_configs",
-        None,
-    )
+    browser = None
+    context = None
 
     try:
 
-        # ====================================================
-        # FORCED BROWSER CONFIG
-        # ====================================================
+        with sync_playwright() as pw:
 
-        def forced_browser_configs(
-            pw,
-            headless=True,
-        ):
-            """
-            ВАЖНО:
+            # ------------------------------------------------
+            # Chromium
+            # ------------------------------------------------
 
-            Текущая версия BinaryOptionsToolsV2
-            ожидает ТРИ значения:
+            logger.info(
+                "[AUTO LOGIN] "
+                "Запускаю Chromium."
+            )
 
-                browser_type
-                launch_kwargs
-                ctx_kwargs
+            browser = pw.chromium.launch(
+                headless=True,
+                executable_path=browser_executable,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--disable-background-networking",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-breakpad",
+                    "--disable-component-update",
+                    "--disable-default-apps",
+                    "--disable-extensions",
+                    "--disable-popup-blocking",
+                    "--disable-prompt-on-repost",
+                    "--disable-sync",
+                    "--no-first-run",
+                    "--no-zygote",
+                    "--renderer-process-limit=1",
+                    "--lang=en-US,en",
+                ],
+            )
 
-            Старый вариант возвращал только 2,
-            из-за чего возникало:
+            # ------------------------------------------------
+            # Context
+            # ------------------------------------------------
 
-                ValueError:
-                not enough values to unpack
-                (expected 3, got 2)
-            """
-
-            launch_args = [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-software-rasterizer",
-
-                "--disable-background-networking",
-                "--disable-background-timer-throttling",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-breakpad",
-                "--disable-component-update",
-                "--disable-default-apps",
-                "--disable-extensions",
-
-                "--disable-features=Translate,BackForwardCache",
-
-                "--disable-hang-monitor",
-                "--disable-popup-blocking",
-                "--disable-prompt-on-repost",
-                "--disable-renderer-backgrounding",
-                "--disable-sync",
-
-                "--metrics-recording-only",
-                "--no-first-run",
-                "--no-zygote",
-
-                # Ограничиваем renderer
-                # для Render Free RAM.
-                "--renderer-process-limit=1",
-
-                "--js-flags=--max-old-space-size=128",
-            ]
-
-            # =================================================
-            # ИМЕННО ТРИ ЗНАЧЕНИЯ
-            # =================================================
-
-            yield (
-                pw.chromium,
-
-                {
-                    "headless": headless,
-                    "executable_path": browser_executable,
-                    "args": launch_args,
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/146.0.0.0 "
+                    "Safari/537.36"
+                ),
+                locale="en-US",
+                timezone_id="America/New_York",
+                viewport={
+                    "width": 1366,
+                    "height": 768,
                 },
-
-                {
-                    # Browser context options.
-                    # Оставляем пустым,
-                    # чтобы библиотека сама использовала
-                    # свои настройки.
+                extra_http_headers={
+                    "Accept-Language":
+                        "en-US,en;q=0.9",
                 },
             )
 
-        # ====================================================
-        # Подменяем browser configs библиотеки
-        # ====================================================
+            # ------------------------------------------------
+            # Do not modify site logic.
+            # Just reduce the obvious automation flag.
+            # ------------------------------------------------
 
-        if original_browser_configs is not None:
-            login_module._browser_configs = (
-                forced_browser_configs
+            context.add_init_script(
+                """
+                Object.defineProperty(
+                    navigator,
+                    'webdriver',
+                    {
+                        get: () => undefined
+                    }
+                );
+                """
             )
 
-        # ====================================================
-        # Получаем login()
-        # ====================================================
+            page = context.new_page()
 
-        login_function = getattr(
-            login_module,
-            "login",
-            None,
-        )
+            # ------------------------------------------------
+            # Page errors
+            # ------------------------------------------------
 
-        if not callable(login_function):
-            logger.error(
-                "[AUTO LOGIN WORKER] login() не найден."
+            page.on(
+                "pageerror",
+                lambda exc: logger.warning(
+                    "[AUTO LOGIN] Page error: %s",
+                    exc,
+                ),
             )
 
-            return None
+            page.on(
+                "console",
+                lambda msg: (
+                    logger.debug(
+                        "[AUTO LOGIN] Browser console: %s",
+                        msg.text,
+                    )
+                    if msg.type in (
+                        "error",
+                        "warning",
+                    )
+                    else None
+                ),
+            )
 
-        logger.info(
-            "[AUTO LOGIN WORKER] Запускаю login()..."
-        )
+            # ------------------------------------------------
+            # Open login
+            # ------------------------------------------------
 
-        # ====================================================
-        # LOGIN
-        # ====================================================
-
-        result = login_function(
-            email,
-            password,
-            backend="playwright",
-            headless=True,
-        )
-
-        # ====================================================
-        # Результат может быть str
-        # ====================================================
-
-        if isinstance(result, str):
-            ssid = result.strip()
-
-            if ssid:
-                logger.info(
-                    "[AUTO LOGIN WORKER] Получен SSID."
-                )
-
-                return ssid
-
-        # ====================================================
-        # Результат может быть dict
-        # ====================================================
-
-        if isinstance(result, dict):
-
-            for key in (
-                "ssid",
-                "session",
-                "session_id",
-                "po_session",
-            ):
-
-                value = result.get(key)
-
-                if value:
-                    ssid = str(value).strip()
-
-                    if ssid:
-                        logger.info(
-                            "[AUTO LOGIN WORKER] "
-                            "Получен SSID из dict."
-                        )
-
-                        return ssid
-
-        # ====================================================
-        # Результат может быть объектом
-        # ====================================================
-
-        for attr in (
-            "ssid",
-            "session",
-            "session_id",
-            "po_session",
-        ):
+            logger.info(
+                "[AUTO LOGIN] "
+                "Открываю %s",
+                LOGIN_URL,
+            )
 
             try:
-                value = getattr(
-                    result,
-                    attr,
-                    None,
+
+                response = page.goto(
+                    LOGIN_URL,
+                    wait_until="domcontentloaded",
+                    timeout=60000,
                 )
 
-                if value:
-                    ssid = str(value).strip()
+                if response:
 
-                    if ssid:
-                        logger.info(
-                            "[AUTO LOGIN WORKER] "
-                            "Получен SSID из объекта."
-                        )
+                    logger.info(
+                        "[AUTO LOGIN] "
+                        "HTTP status: %s",
+                        response.status,
+                    )
 
-                        return ssid
+            except PlaywrightTimeoutError:
+
+                logger.warning(
+                    "[AUTO LOGIN] "
+                    "Page.goto timeout."
+                )
+
+            # ------------------------------------------------
+            # Wait a little for JS
+            # ------------------------------------------------
+
+            page.wait_for_timeout(
+                3000
+            )
+
+            logger.info(
+                "[AUTO LOGIN] Current URL: %s",
+                page.url,
+            )
+
+            # ------------------------------------------------
+            # Detect obvious block/captcha
+            # ------------------------------------------------
+
+            body_text = ""
+
+            try:
+
+                body_text = (
+                    page.locator(
+                        "body"
+                    ).inner_text(
+                        timeout=5000
+                    )
+                    or ""
+                )
 
             except Exception:
                 pass
 
-        logger.error(
-            "[AUTO LOGIN WORKER] "
-            "Login завершился без SSID."
-        )
+            lower_body = body_text.lower()
 
-        return None
+            blocked_words = (
+                "captcha",
+                "verify you are human",
+                "access denied",
+                "cloudflare",
+                "security check",
+                "checking your browser",
+            )
+
+            if any(
+                word in lower_body
+                for word in blocked_words
+            ):
+
+                logger.error(
+                    "[AUTO LOGIN] "
+                    "Pocket Option returned "
+                    "a security/CAPTCHA page."
+                )
+
+                return None
+
+            # ------------------------------------------------
+            # Find email input
+            # ------------------------------------------------
+
+            email_selectors = [
+                'input[name="email"]',
+                'input[type="email"]',
+                'input[autocomplete="email"]',
+                'input[placeholder*="email" i]',
+            ]
+
+            email_locator = None
+
+            for selector in email_selectors:
+
+                try:
+
+                    locator = page.locator(
+                        selector
+                    ).first
+
+                    if locator.count() > 0:
+
+                        email_locator = locator
+
+                        logger.info(
+                            "[AUTO LOGIN] "
+                            "Email field found: %s",
+                            selector,
+                        )
+
+                        break
+
+                except Exception:
+                    continue
+
+            if email_locator is None:
+
+                logger.error(
+                    "[AUTO LOGIN] "
+                    "Email field not found."
+                )
+
+                try:
+
+                    logger.error(
+                        "[AUTO LOGIN] "
+                        "Page title: %s",
+                        page.title(),
+                    )
+
+                except Exception:
+                    pass
+
+                return None
+
+            # ------------------------------------------------
+            # Password input
+            # ------------------------------------------------
+
+            password_selectors = [
+                'input[name="password"]',
+                'input[type="password"]',
+                'input[autocomplete="current-password"]',
+            ]
+
+            password_locator = None
+
+            for selector in password_selectors:
+
+                try:
+
+                    locator = page.locator(
+                        selector
+                    ).first
+
+                    if locator.count() > 0:
+
+                        password_locator = locator
+
+                        logger.info(
+                            "[AUTO LOGIN] "
+                            "Password field found: %s",
+                            selector,
+                        )
+
+                        break
+
+                except Exception:
+                    continue
+
+            if password_locator is None:
+
+                logger.error(
+                    "[AUTO LOGIN] "
+                    "Password field not found."
+                )
+
+                return None
+
+            # ------------------------------------------------
+            # Fill
+            # ------------------------------------------------
+
+            logger.info(
+                "[AUTO LOGIN] "
+                "Заполняю email/password."
+            )
+
+            email_locator.fill(
+                email,
+                timeout=30000,
+            )
+
+            password_locator.fill(
+                password,
+                timeout=30000,
+            )
+
+            # ------------------------------------------------
+            # Remember
+            # ------------------------------------------------
+
+            remember_selectors = [
+                'input[name="remember"]',
+                'input[type="checkbox"]',
+            ]
+
+            for selector in remember_selectors:
+
+                try:
+
+                    locator = page.locator(
+                        selector
+                    ).first
+
+                    if locator.count() > 0:
+
+                        if not locator.is_checked():
+
+                            locator.check(
+                                timeout=2000
+                            )
+
+                        break
+
+                except Exception:
+                    continue
+
+            # ------------------------------------------------
+            # Submit
+            # ------------------------------------------------
+
+            submit_selectors = [
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:has-text("Sign in")',
+                'button:has-text("Login")',
+            ]
+
+            submitted = False
+
+            for selector in submit_selectors:
+
+                try:
+
+                    locator = page.locator(
+                        selector
+                    ).first
+
+                    if locator.count() > 0:
+
+                        logger.info(
+                            "[AUTO LOGIN] "
+                            "Нажимаю кнопку: %s",
+                            selector,
+                        )
+
+                        locator.click(
+                            timeout=10000
+                        )
+
+                        submitted = True
+
+                        break
+
+                except Exception:
+                    continue
+
+            if not submitted:
+
+                logger.error(
+                    "[AUTO LOGIN] "
+                    "Кнопка входа не найдена."
+                )
+
+                return None
+
+            # ------------------------------------------------
+            # Wait for redirect / session
+            # ------------------------------------------------
+
+            logger.info(
+                "[AUTO LOGIN] "
+                "Ожидаю авторизацию..."
+            )
+
+            deadline = (
+                asyncio.get_event_loop
+                if False
+                else None
+            )
+
+            # Playwright-side polling.
+            for _ in range(60):
+
+                page.wait_for_timeout(
+                    1000
+                )
+
+                # --------------------------------------------
+                # Check cookie
+                # --------------------------------------------
+
+                cookies = context.cookies()
+
+                for cookie in cookies:
+
+                    if (
+                        cookie.get("name")
+                        == "po_session"
+                    ):
+
+                        value = (
+                            cookie.get("value")
+                            or ""
+                        ).strip()
+
+                        if value:
+
+                            logger.info(
+                                "[AUTO LOGIN] "
+                                "po_session получен."
+                            )
+
+                            return (
+                                _build_ssid_from_cookie(
+                                    value,
+                                    demo=demo,
+                                )
+                            )
+
+                # --------------------------------------------
+                # Check URL
+                # --------------------------------------------
+
+                current_url = page.url
+
+                if "/login/" not in current_url:
+
+                    logger.info(
+                        "[AUTO LOGIN] "
+                        "Login redirect: %s",
+                        current_url,
+                    )
+
+                # --------------------------------------------
+                # Detect login error
+                # --------------------------------------------
+
+                try:
+
+                    errors = page.locator(
+                        ".error, "
+                        ".alert, "
+                        ".form-error, "
+                        "[role='alert']"
+                    )
+
+                    if errors.count() > 0:
+
+                        text = (
+                            errors.first
+                            .text_content(
+                                timeout=1000
+                            )
+                            or ""
+                        ).strip()
+
+                        if text:
+
+                            logger.warning(
+                                "[AUTO LOGIN] "
+                                "Login page error: %s",
+                                text[:500],
+                            )
+
+                except Exception:
+                    pass
+
+            logger.error(
+                "[AUTO LOGIN] "
+                "Авторизация завершилась "
+                "без po_session."
+            )
+
+            logger.error(
+                "[AUTO LOGIN] Final URL: %s",
+                page.url,
+            )
+
+            return None
 
     except Exception:
+
         logger.exception(
-            "[AUTO LOGIN WORKER] Login exception."
+            "[AUTO LOGIN] "
+            "Custom Playwright login exception."
         )
 
         return None
 
     finally:
 
-        # ====================================================
-        # Возвращаем оригинальную функцию
-        # ====================================================
+        try:
+
+            if context is not None:
+                context.close()
+
+        except Exception:
+            pass
 
         try:
 
-            if original_browser_configs is not None:
-                login_module._browser_configs = (
-                    original_browser_configs
-                )
+            if browser is not None:
+                browser.close()
 
         except Exception:
             pass
 
 
 # ============================================================
-# POCKET MARKET
+# MARKET
 # ============================================================
 
 class PocketMarket:
@@ -568,7 +902,7 @@ class PocketMarket:
 
         self.client: Optional[Any] = None
 
-        self.connected: bool = False
+        self.connected = False
 
         self.ssid: Optional[str] = None
 
@@ -584,7 +918,9 @@ class PocketMarket:
     # AUTO LOGIN
     # ========================================================
 
-    async def auto_login(self) -> Optional[str]:
+    async def auto_login(
+        self,
+    ) -> Optional[str]:
 
         async with self._login_lock:
 
@@ -610,12 +946,9 @@ class PocketMarket:
                 return None
 
             logger.info(
-                "[AUTO LOGIN] Подготавливаю Playwright..."
+                "[AUTO LOGIN] "
+                "Подготавливаю Playwright..."
             )
-
-            # ------------------------------------------------
-            # Prepare browser
-            # ------------------------------------------------
 
             try:
 
@@ -649,36 +982,40 @@ class PocketMarket:
             if not browser_executable:
 
                 logger.error(
-                    "[AUTO LOGIN] Chromium не найден."
+                    "[AUTO LOGIN] "
+                    "Chromium не найден."
                 )
 
                 return None
 
             logger.info(
-                "[AUTO LOGIN] Playwright готов."
+                "[AUTO LOGIN] "
+                "Playwright готов."
             )
 
             logger.info(
-                "[AUTO LOGIN] Browser executable: %s",
+                "[AUTO LOGIN] "
+                "Browser executable: %s",
                 browser_executable,
             )
 
-            logger.info(
-                "[AUTO LOGIN] Запускаю login worker."
+            demo = bool(
+                getattr(
+                    config,
+                    "PO_DEMO",
+                    True,
+                )
             )
-
-            # ------------------------------------------------
-            # Login without multiprocessing
-            # ------------------------------------------------
 
             try:
 
                 ssid = await asyncio.wait_for(
                     asyncio.to_thread(
-                        _pocket_login_sync,
-                        email,
-                        password,
+                        _browser_login_sync,
+                        str(email),
+                        str(password),
                         browser_executable,
+                        demo,
                     ),
                     timeout=AUTO_LOGIN_TIMEOUT,
                 )
@@ -687,7 +1024,7 @@ class PocketMarket:
 
                 logger.error(
                     "[AUTO LOGIN] "
-                    "Login timeout: %s sec",
+                    "Custom login timeout: %s sec",
                     AUTO_LOGIN_TIMEOUT,
                 )
 
@@ -697,7 +1034,7 @@ class PocketMarket:
 
                 logger.exception(
                     "[AUTO LOGIN] "
-                    "Ошибка login worker."
+                    "Custom login failed."
                 )
 
                 return None
@@ -711,8 +1048,11 @@ class PocketMarket:
 
                 return None
 
+            self.ssid = ssid
+
             logger.info(
-                "[AUTO LOGIN] SSID успешно получен."
+                "[AUTO LOGIN] "
+                "SSID успешно получен."
             )
 
             return ssid
@@ -730,7 +1070,8 @@ class PocketMarket:
 
             logger.info(
                 "[MARKET] "
-                "STEP 3/5: Создаю PocketOptionAsync client."
+                "STEP 3/5: "
+                "Создаю PocketOptionAsync client."
             )
 
             self.client = PocketOptionAsync(
@@ -772,7 +1113,9 @@ class PocketMarket:
     # CONNECTION CHECK
     # ========================================================
 
-    async def _check_connection(self) -> bool:
+    async def _check_connection(
+        self,
+    ) -> bool:
 
         if self.client is None:
             return False
@@ -785,20 +1128,27 @@ class PocketMarket:
                 None,
             )
 
-            if not callable(balance_method):
+            if not callable(
+                balance_method
+            ):
 
                 logger.warning(
-                    "[MARKET] balance() отсутствует."
+                    "[MARKET] "
+                    "balance() отсутствует."
                 )
 
-                # Если balance API нет,
-                # не считаем это автоматически
-                # разрывом соединения.
                 return True
 
-            await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 balance_method(),
                 timeout=BALANCE_TIMEOUT,
+            )
+
+            logger.info(
+                "[MARKET] "
+                "Connection check OK. "
+                "Balance=%s",
+                result,
             )
 
             return True
@@ -806,7 +1156,8 @@ class PocketMarket:
         except asyncio.TimeoutError:
 
             logger.warning(
-                "[MARKET] balance() timeout."
+                "[MARKET] "
+                "balance() timeout."
             )
 
             return False
@@ -825,7 +1176,9 @@ class PocketMarket:
     # CONNECT
     # ========================================================
 
-    async def connect(self) -> bool:
+    async def connect(
+        self,
+    ) -> bool:
 
         async with self._connect_lock:
 
@@ -837,7 +1190,7 @@ class PocketMarket:
             )
 
             # ------------------------------------------------
-            # Close old client
+            # Close previous client
             # ------------------------------------------------
 
             if self.client is not None:
@@ -853,7 +1206,7 @@ class PocketMarket:
                     )
 
             # ------------------------------------------------
-            # SSID
+            # Existing SSID
             # ------------------------------------------------
 
             ssid = getattr(
@@ -864,11 +1217,14 @@ class PocketMarket:
 
             if ssid:
 
-                ssid = str(ssid).strip()
+                ssid = str(
+                    ssid
+                ).strip()
 
                 logger.info(
                     "[MARKET] "
-                    "STEP 1/5: Использую PO_SSID."
+                    "STEP 1/5: "
+                    "Использую PO_SSID."
                 )
 
             else:
@@ -898,12 +1254,12 @@ class PocketMarket:
             )
 
             # ------------------------------------------------
-            # Create client
+            # Client
             # ------------------------------------------------
 
             try:
 
-                client_created = await asyncio.wait_for(
+                created = await asyncio.wait_for(
                     self._create_client(
                         ssid
                     ),
@@ -914,16 +1270,16 @@ class PocketMarket:
 
                 logger.error(
                     "[MARKET] "
-                    "STEP 3/5 TIMEOUT: client."
+                    "STEP 3/5 TIMEOUT."
                 )
 
                 return False
 
-            if not client_created:
+            if not created:
 
                 logger.error(
                     "[MARKET] "
-                    "STEP 3/5 FAILED: client."
+                    "STEP 3/5 FAILED."
                 )
 
                 return False
@@ -934,10 +1290,13 @@ class PocketMarket:
 
             logger.info(
                 "[MARKET] "
-                "STEP 4/5: Проверяю соединение."
+                "STEP 4/5: "
+                "Проверяю соединение."
             )
 
-            connected = await self._check_connection()
+            connected = await (
+                self._check_connection()
+            )
 
             if not connected:
 
@@ -948,13 +1307,15 @@ class PocketMarket:
 
                 await asyncio.sleep(3)
 
-                connected = await self._check_connection()
+                connected = await (
+                    self._check_connection()
+                )
 
             if not connected:
 
                 logger.error(
                     "[MARKET] "
-                    "STEP 4/5 FAILED: connection."
+                    "STEP 4/5 FAILED."
                 )
 
                 await self.disconnect()
@@ -969,7 +1330,8 @@ class PocketMarket:
 
             logger.info(
                 "[MARKET] "
-                "STEP 5/5: Pocket Option connected."
+                "STEP 5/5: "
+                "Pocket Option connected."
             )
 
             logger.info(
@@ -989,7 +1351,10 @@ class PocketMarket:
         limit: int = 200,
     ) -> list[dict[str, Any]]:
 
-        if not self.connected or self.client is None:
+        if (
+            not self.connected
+            or self.client is None
+        ):
 
             raise RuntimeError(
                 "Market is not connected"
@@ -998,7 +1363,6 @@ class PocketMarket:
         pair = str(pair).strip()
 
         if not pair:
-
             raise ValueError(
                 "Pair is empty"
             )
@@ -1027,11 +1391,9 @@ class PocketMarket:
 
         try:
 
-            # ------------------------------------------------
-            # Preferred API
-            # ------------------------------------------------
-
-            if callable(get_candles):
+            if callable(
+                get_candles
+            ):
 
                 logger.debug(
                     "[MARKET] "
@@ -1050,11 +1412,9 @@ class PocketMarket:
                     timeout=CANDLE_REQUEST_TIMEOUT,
                 )
 
-            # ------------------------------------------------
-            # Fallback API
-            # ------------------------------------------------
-
-            elif callable(candles_method):
+            elif callable(
+                candles_method
+            ):
 
                 logger.debug(
                     "[MARKET] "
@@ -1102,37 +1462,26 @@ class PocketMarket:
 
             raise
 
-        # ====================================================
-        # EMPTY
-        # ====================================================
-
         if result is None:
             return []
 
-        # ====================================================
-        # Tuple response
-        # ====================================================
-
-        if isinstance(result, tuple):
+        if isinstance(
+            result,
+            tuple,
+        ):
 
             result = result[0]
 
-        # ====================================================
-        # Convert iterable to list
-        # ====================================================
-
-        if not isinstance(result, list):
+        if not isinstance(
+            result,
+            list,
+        ):
 
             try:
                 result = list(result)
 
             except Exception:
-
                 return []
-
-        # ====================================================
-        # NORMALIZE
-        # ====================================================
 
         normalized: list[
             dict[str, Any]
@@ -1140,20 +1489,14 @@ class PocketMarket:
 
         for candle in result:
 
-            # ------------------------------------------------
-            # Dict candle
-            # ------------------------------------------------
-
             if isinstance(
                 candle,
                 dict,
             ):
 
-                item = dict(candle)
-
-            # ------------------------------------------------
-            # Object candle
-            # ------------------------------------------------
+                item = dict(
+                    candle
+                )
 
             else:
 
@@ -1179,6 +1522,7 @@ class PocketMarket:
                         )
 
                         if value is not None:
+
                             item[name] = value
 
                     except Exception:
@@ -1187,14 +1531,16 @@ class PocketMarket:
             if not item:
                 continue
 
-            # ------------------------------------------------
-            # Timestamp
-            # ------------------------------------------------
-
             timestamp = (
-                item.get("timestamp")
-                or item.get("time")
-                or item.get("timestamp_ms")
+                item.get(
+                    "timestamp"
+                )
+                or item.get(
+                    "time"
+                )
+                or item.get(
+                    "timestamp_ms"
+                )
             )
 
             if timestamp is None:
@@ -1206,17 +1552,13 @@ class PocketMarket:
                     timestamp
                 )
 
-                # milliseconds -> seconds
                 if timestamp > 10_000_000_000:
+
                     timestamp /= 1000.0
 
             except Exception:
 
                 continue
-
-            # ------------------------------------------------
-            # OHLC
-            # ------------------------------------------------
 
             try:
 
@@ -1240,10 +1582,6 @@ class PocketMarket:
 
                 continue
 
-            # ------------------------------------------------
-            # Volume
-            # ------------------------------------------------
-
             try:
 
                 volume = float(
@@ -1258,10 +1596,6 @@ class PocketMarket:
 
                 volume = 0.0
 
-            # ------------------------------------------------
-            # Final normalized candle
-            # ------------------------------------------------
-
             normalized.append(
                 {
                     "timestamp": timestamp,
@@ -1274,17 +1608,10 @@ class PocketMarket:
                 }
             )
 
-        # ====================================================
-        # SORT
-        # ====================================================
-
         normalized.sort(
-            key=lambda x: x["timestamp"]
+            key=lambda x:
+            x["timestamp"]
         )
-
-        # ====================================================
-        # LIMIT
-        # ====================================================
 
         if limit > 0:
 
@@ -1302,7 +1629,7 @@ class PocketMarket:
         return normalized
 
     # ========================================================
-    # GET CANDLES ALIAS
+    # GET CANDLES
     # ========================================================
 
     async def get_candles(
@@ -1363,7 +1690,9 @@ class PocketMarket:
     # RECONNECT
     # ========================================================
 
-    async def reconnect(self) -> bool:
+    async def reconnect(
+        self,
+    ) -> bool:
 
         if not self.ssid:
 
@@ -1381,7 +1710,9 @@ class PocketMarket:
                 None,
             )
 
-            if callable(reconnect_method):
+            if callable(
+                reconnect_method
+            ):
 
                 logger.info(
                     "[MARKET] "
@@ -1421,7 +1752,9 @@ class PocketMarket:
     # DISCONNECT
     # ========================================================
 
-    async def disconnect(self) -> None:
+    async def disconnect(
+        self,
+    ) -> None:
 
         self.connected = False
 
@@ -1432,17 +1765,15 @@ class PocketMarket:
 
         self.client = None
 
-        # ----------------------------------------------------
-        # shutdown()
-        # ----------------------------------------------------
-
         shutdown = getattr(
             client,
             "shutdown",
             None,
         )
 
-        if callable(shutdown):
+        if callable(
+            shutdown
+        ):
 
             try:
 
@@ -1472,17 +1803,15 @@ class PocketMarket:
 
             return
 
-        # ----------------------------------------------------
-        # close()
-        # ----------------------------------------------------
-
         close = getattr(
             client,
             "close",
             None,
         )
 
-        if callable(close):
+        if callable(
+            close
+        ):
 
             try:
 
@@ -1505,18 +1834,22 @@ class PocketMarket:
                 )
 
     # ========================================================
-    # CLOSE ALIAS
+    # CLOSE
     # ========================================================
 
-    async def close(self) -> None:
+    async def close(
+        self,
+    ) -> None:
 
         await self.disconnect()
 
     # ========================================================
-    # CONNECTION STATE
+    # STATE
     # ========================================================
 
-    def is_connected(self) -> bool:
+    def is_connected(
+        self,
+    ) -> bool:
 
         return bool(
             self.connected
@@ -1540,7 +1873,10 @@ class PocketMarket:
             None,
         )
 
-        if not callable(method):
+        if not callable(
+            method
+        ):
+
             return None
 
         try:
@@ -1596,7 +1932,9 @@ if __name__ == "__main__":
 
             if ok:
 
-                balance = await market.balance()
+                balance = (
+                    await market.balance()
+                )
 
                 print(
                     "BALANCE:",
@@ -1605,10 +1943,12 @@ if __name__ == "__main__":
 
                 try:
 
-                    candles = await market.candles(
-                        "EURUSD_otc",
-                        minutes=1,
-                        limit=10,
+                    candles = (
+                        await market.candles(
+                            "EURUSD_otc",
+                            minutes=1,
+                            limit=10,
+                        )
                     )
 
                     print(
