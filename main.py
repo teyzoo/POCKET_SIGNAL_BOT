@@ -4,14 +4,19 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Callable, Awaitable
 
 import uvicorn
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from fastapi import FastAPI
 
 import config
@@ -115,20 +120,6 @@ async def safe_callback_answer(
 ) -> bool:
     """
     Безопасное подтверждение Telegram callback.
-
-    Telegram callback_query имеет короткий срок жизни.
-    Если обработчик сначала выполняет тяжёлую операцию,
-    callback может стать просроченным.
-
-    Поэтому все обработчики вызывают эту функцию сразу
-    после получения callback.
-
-    Ошибки:
-      - query is too old
-      - response timeout expired
-      - query ID is invalid
-
-    НЕ должны ломать обработчик.
     """
 
     try:
@@ -400,9 +391,6 @@ async def safe_edit(
 ):
     """
     Безопасное редактирование сообщения.
-
-    Если сообщение уже изменилось, было удалено или Telegram
-    вернул ошибку — пытаемся отправить новое сообщение.
     """
 
     try:
@@ -436,16 +424,50 @@ async def progress_message(
     callback: CallbackQuery,
     text: str,
 ):
+    """
+    Живое обновление сообщения анализа.
+
+    Используется только для отображения прогресса.
+    Ошибка обновления Telegram не должна останавливать анализ.
+    """
+
     try:
         if callback.message:
-            await callback.message.edit_text(
-                text
-            )
+            await callback.message.edit_text(text)
 
-    except Exception:
+    except Exception as exc:
+        error_text = str(exc).lower()
+
+        if "message is not modified" in error_text:
+            return
+
         logger.debug(
-            "Не удалось обновить progress",
-            exc_info=True,
+            "Не удалось обновить progress: %s",
+            exc,
+        )
+
+
+async def progress_message_object(
+    message: Message,
+    text: str,
+):
+    """
+    Аналог progress_message для обычного Message.
+    Нужен для будущих фоновых/автоматических процессов.
+    """
+
+    try:
+        await message.edit_text(text)
+
+    except Exception as exc:
+        error_text = str(exc).lower()
+
+        if "message is not modified" in error_text:
+            return
+
+        logger.debug(
+            "Не удалось обновить progress message: %s",
+            exc,
         )
 
 
@@ -502,20 +524,58 @@ def format_signal(signal) -> str:
 # MARKET
 # ============================================================
 
-async def ensure_market_ready() -> bool:
+async def ensure_market_ready(
+    status_callback: Optional[
+        Callable[[str], Awaitable[None]]
+    ] = None,
+) -> bool:
+    """
+    Подключает Pocket Option.
+
+    Если передан status_callback, Telegram-сообщение
+    будет обновляться по этапам подключения.
+    """
+
     global MARKET_READY
 
     if MARKET_READY:
+        if status_callback:
+            await status_callback(
+                (
+                    "📡 <b>POCKET OPTION ПОДКЛЮЧЁН</b>\n\n"
+                    "✅ Рыночное соединение уже установлено.\n\n"
+                    "📊 Получаю актуальные рыночные данные..."
+                )
+            )
+
         return True
 
     async with MARKET_CONNECT_LOCK:
         if MARKET_READY:
+            if status_callback:
+                await status_callback(
+                    (
+                        "📡 <b>POCKET OPTION ПОДКЛЮЧЁН</b>\n\n"
+                        "✅ Рыночное соединение установлено.\n\n"
+                        "📊 Получаю актуальные рыночные данные..."
+                    )
+                )
+
             return True
 
         try:
             logger.info(
                 "Connecting to Pocket Option..."
             )
+
+            if status_callback:
+                await status_callback(
+                    (
+                        "🔌 <b>ПОДКЛЮЧЕНИЕ К POCKET OPTION</b>\n\n"
+                        "⏳ Авторизация и установка соединения...\n\n"
+                        "🌐 Запускаю рыночный источник."
+                    )
+                )
 
             await market.connect()
 
@@ -525,6 +585,15 @@ async def ensure_market_ready() -> bool:
                 "Pocket Option market connected"
             )
 
+            if status_callback:
+                await status_callback(
+                    (
+                        "📡 <b>POCKET OPTION ПОДКЛЮЧЁН</b>\n\n"
+                        "✅ Соединение с рыночным источником установлено.\n\n"
+                        "📊 Получаю актуальные рыночные данные..."
+                    )
+                )
+
             return True
 
         except Exception:
@@ -533,6 +602,16 @@ async def ensure_market_ready() -> bool:
             logger.exception(
                 "Pocket Option connection failed"
             )
+
+            if status_callback:
+                await status_callback(
+                    (
+                        "❌ <b>ОШИБКА ПОДКЛЮЧЕНИЯ</b>\n\n"
+                        "Не удалось установить соединение "
+                        "с Pocket Option.\n\n"
+                        "Повторная попытка будет выполнена автоматически."
+                    )
+                )
 
             return False
 
@@ -626,21 +705,44 @@ async def scan_market(
     best_signal = None
     successful_pairs = 0
 
+    total_checks = (
+        len(pairs) * len(timeframes)
+    )
+
+    # --------------------------------------------------------
+    # START ANALYSIS
+    # --------------------------------------------------------
+
+    await progress_message(
+        callback,
+        (
+            "🧠 <b>АНАЛИЗ РЫНКА НАЧАТ</b>\n\n"
+            f"💱 Пары: <b>{total}</b>\n"
+            f"⏱ Таймфреймы: "
+            f"<b>{', '.join(map(str, timeframes))} мин</b>\n\n"
+            "📊 Рассчитываю технические индикаторы...\n"
+            "🔎 Ищу сильную точку входа..."
+        ),
+    )
+
+    await asyncio.sleep(0.15)
+
     for pair_index, pair in enumerate(
         pairs,
         start=1,
     ):
+        # ----------------------------------------------------
+        # MARKET DATA
+        # ----------------------------------------------------
+
         await progress_message(
             callback,
             (
-                "🔎 <b>АНАЛИЗ OTC-РЫНКА</b>\n\n"
-                f"💱 Пара: "
-                f"<b>{pair_name(pair)}</b>\n"
-                f"📊 Пары: "
-                f"<b>{pair_index}/{total}</b>\n"
-                f"⏱ Таймфреймы: "
-                f"<b>{', '.join(map(str, timeframes))} мин</b>\n\n"
-                "Получение рыночных данных..."
+                "📊 <b>ПОЛУЧЕНИЕ РЫНОЧНЫХ ДАННЫХ</b>\n\n"
+                f"💱 Пара: <b>{pair_name(pair)}</b>\n"
+                f"📊 Пары: <b>{pair_index}/{total}</b>\n\n"
+                "📡 Получаю актуальные 1-минутные свечи...\n"
+                "⏳ Ожидаю корректные рыночные данные..."
             ),
         )
 
@@ -652,22 +754,49 @@ async def scan_market(
 
             successful_pairs += 1
 
+            logger.info(
+                "Received %s candles for %s",
+                len(candles),
+                pair,
+            )
+
         except Exception:
+            logger.warning(
+                "Could not get market data for %s",
+                pair,
+            )
             continue
+
+        # ----------------------------------------------------
+        # TIMEFRAME ANALYSIS
+        # ----------------------------------------------------
 
         for timeframe in timeframes:
             completed += 1
 
+            progress_percent = (
+                completed / max(total_checks, 1)
+            ) * 100
+
             await progress_message(
                 callback,
                 (
-                    "🔎 <b>ТЕХНИЧЕСКИЙ АНАЛИЗ</b>\n\n"
-                    f"💱 {pair_name(pair)}\n"
-                    f"⏱ {timeframe} мин\n"
-                    f"📊 Проверка: "
-                    f"<b>{completed}</b>\n\n"
-                    "EMA • RSI • MACD • Bollinger • "
-                    "Stochastic • Momentum • ATR"
+                    "🧠 <b>ТЕХНИЧЕСКИЙ АНАЛИЗ</b>\n\n"
+                    f"💱 <b>{pair_name(pair)}</b>\n"
+                    f"📊 Пара: <b>{pair_index}/{total}</b>\n"
+                    f"⏱ Таймфрейм: <b>{timeframe} мин</b>\n"
+                    f"🔄 Проверка: "
+                    f"<b>{completed}/{total_checks}</b> "
+                    f"({progress_percent:.0f}%)\n\n"
+                    "📈 Рассчитываю:\n"
+                    "• EMA\n"
+                    "• RSI\n"
+                    "• MACD\n"
+                    "• Bollinger Bands\n"
+                    "• Stochastic\n"
+                    "• Momentum\n"
+                    "• ATR\n\n"
+                    "🔎 Ищу сильную точку входа..."
                 ),
             )
 
@@ -688,6 +817,21 @@ async def scan_market(
 
             if signal is None:
                 continue
+
+            # ------------------------------------------------
+            # SIGNAL FOUND
+            # ------------------------------------------------
+
+            await progress_message(
+                callback,
+                (
+                    "🎯 <b>КАНДИДАТ НА СИГНАЛ НАЙДЕН</b>\n\n"
+                    f"💱 {pair_name(pair)}\n"
+                    f"⏱ {timeframe} мин\n\n"
+                    "🧠 Проверяю качество сигнала...\n"
+                    "📊 Сравниваю с другими найденными точками..."
+                ),
+            )
 
             if best_signal is None:
                 best_signal = signal
@@ -712,6 +856,40 @@ async def scan_market(
                 )
             ):
                 best_signal = signal
+
+    # --------------------------------------------------------
+    # ANALYSIS COMPLETE
+    # --------------------------------------------------------
+
+    if best_signal is not None:
+        await progress_message(
+            callback,
+            (
+                "✅ <b>АНАЛИЗ ЗАВЕРШЁН</b>\n\n"
+                "🟢 <b>СИЛЬНЫЙ СИГНАЛ НАЙДЕН</b>\n\n"
+                f"💱 {pair_name(best_signal.pair)}\n"
+                f"📌 {direction_text(best_signal.direction)}\n"
+                f"⏱ {best_signal.timeframe} мин\n"
+                f"🎯 Уверенность: "
+                f"{float(best_signal.probability):.1f}%\n"
+                f"⭐ Quality Score: "
+                f"{float(best_signal.quality):.1f}/100\n\n"
+                "📤 Подготавливаю сигнал..."
+            ),
+        )
+
+    else:
+        await progress_message(
+            callback,
+            (
+                "⚪ <b>АНАЛИЗ ЗАВЕРШЁН</b>\n\n"
+                "Сильного сигнала сейчас нет.\n\n"
+                "📊 Рынок проверен.\n"
+                "🧠 Технический анализ выполнен.\n"
+                "🔎 Сильная точка входа не подтверждена.\n\n"
+                "Слабый сигнал отправлять не буду."
+            ),
+        )
 
     return (
         best_signal,
@@ -800,8 +978,6 @@ async def start_handler(
 async def back_main(
     callback: CallbackQuery,
 ):
-    # КРИТИЧНО:
-    # подтверждаем callback ДО любых других операций.
     await safe_callback_answer(
         callback
     )
@@ -824,7 +1000,6 @@ async def back_main(
 async def signal_menu(
     callback: CallbackQuery,
 ):
-    # callback подтверждается ПЕРВЫМ действием.
     await safe_callback_answer(
         callback
     )
@@ -923,7 +1098,6 @@ async def signal_pair_selected(
 async def signal_time_selected(
     callback: CallbackQuery,
 ):
-    # Самое первое действие.
     await safe_callback_answer(
         callback
     )
@@ -1030,15 +1204,27 @@ async def signal_time_selected(
                 timeframe
             ]
 
-        await progress_message(
-            callback,
+        # ====================================================
+        # LIVE CONNECTION STATUS
+        # ====================================================
+
+        async def telegram_status(text: str):
+            await progress_message(
+                callback,
+                text,
+            )
+
+        await telegram_status(
             (
-                "🔌 <b>ПРОВЕРКА РЫНКА</b>\n\n"
-                "Подключение к Pocket Option..."
-            ),
+                "🔌 <b>ПОДКЛЮЧЕНИЕ К POCKET OPTION</b>\n\n"
+                "⏳ Авторизация и установка соединения...\n\n"
+                "🌐 Подготавливаю рыночный источник."
+            )
         )
 
-        if not await ensure_market_ready():
+        if not await ensure_market_ready(
+            status_callback=telegram_status
+        ):
             await safe_edit(
                 callback,
                 (
@@ -1053,6 +1239,24 @@ async def signal_time_selected(
             )
             return
 
+        # ====================================================
+        # MARKET READY
+        # ====================================================
+
+        await telegram_status(
+            (
+                "📡 <b>POCKET OPTION ПОДКЛЮЧЁН</b>\n\n"
+                "✅ Рыночное соединение установлено.\n\n"
+                "📊 Получаю актуальные рыночные данные..."
+            )
+        )
+
+        await asyncio.sleep(0.2)
+
+        # ====================================================
+        # ANALYSIS
+        # ====================================================
+
         best_signal, successful_pairs = (
             await scan_market(
                 callback,
@@ -1060,6 +1264,10 @@ async def signal_time_selected(
                 timeframes,
             )
         )
+
+        # ====================================================
+        # NO MARKET DATA
+        # ====================================================
 
         if successful_pairs == 0:
             await safe_edit(
@@ -1076,6 +1284,10 @@ async def signal_time_selected(
             )
             return
 
+        # ====================================================
+        # NO STRONG SIGNAL
+        # ====================================================
+
         if best_signal is None:
             await safe_edit(
                 callback,
@@ -1090,15 +1302,30 @@ async def signal_time_selected(
                     f"<b>{float(config.MIN_PROBABILITY):.1f}%</b>\n"
                     f"⭐ Минимальный Quality Score: "
                     f"<b>{float(config.MIN_SIGNAL_SCORE):.1f}</b>\n\n"
+                    "📊 Рынок проанализирован.\n"
                     "Слабый сигнал специально не выдаётся."
                 ),
                 main_keyboard(),
             )
             return
 
+        # ====================================================
+        # SAVE + FINAL SIGNAL
+        # ====================================================
+
+        await telegram_status(
+            (
+                "✅ <b>АНАЛИЗ ЗАВЕРШЁН</b>\n\n"
+                "🟢 <b>СИЛЬНЫЙ СИГНАЛ НАЙДЕН</b>\n\n"
+                "📊 Формирую итоговое сообщение..."
+            )
+        )
+
         await save_best_signal(
             best_signal
         )
+
+        await asyncio.sleep(0.15)
 
         await safe_edit(
             callback,
@@ -1317,6 +1544,10 @@ def is_owner(
         config.OWNER_ID
     )
 
+
+# ============================================================
+# ADMIN COMMAND
+# ============================================================
 
 @dp.message(
     F.text == "/admin"
