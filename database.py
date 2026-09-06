@@ -35,11 +35,6 @@ from config import config
 
 logger = logging.getLogger("pocket_database")
 
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
 MIN_HISTORY_SAMPLE = 20
 
 
@@ -171,8 +166,8 @@ class Signal(Base):
         nullable=False,
     )
 
-    # Технический score.
-    # Это НЕ исторический WINRATE.
+    # Техническая уверенность.
+    # НЕ исторический WINRATE.
     probability: Mapped[float] = mapped_column(
         Float,
         nullable=False,
@@ -210,13 +205,11 @@ class Signal(Base):
         index=True,
     )
 
-    # Цена в момент входа.
     entry_price: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,
     )
 
-    # Цена на момент экспирации.
     close_price: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,
@@ -291,9 +284,7 @@ async def init_db():
 
                 result = await connection.exec_driver_sql(
                     """
-                    SELECT
-                        column_name,
-                        is_nullable
+                    SELECT column_name
                     FROM information_schema.columns
                     WHERE table_schema = 'public'
                     AND table_name = 'users'
@@ -525,25 +516,158 @@ async def get_access_users() -> list[User]:
 # ============================================================
 
 async def save_signal(
-    pair: str,
-    timeframe: int,
-    direction: str,
-    probability: float,
-    quality: float,
-    entry_time: datetime,
-    close_time: datetime,
-    reasons: list[str],
-    entry_price: float | None = None,
+    pair=None,
+    timeframe=None,
+    direction=None,
+    probability=None,
+    quality=None,
+    entry_time=None,
+    close_time=None,
+    reasons=None,
+    entry_price=None,
 ):
+    """
+    Сохраняет сигнал.
+
+    Поддерживает ДВА варианта:
+
+    1. save_signal(signal)
+
+    2. save_signal(
+           pair,
+           timeframe,
+           direction,
+           probability,
+           quality,
+           entry_time,
+           close_time,
+           reasons,
+           entry_price
+       )
+
+    Это исправляет несовместимость main.py
+    и database.py.
+    """
+
+    # --------------------------------------------------------
+    # Если передан объект SignalResult
+    # --------------------------------------------------------
+
+    if (
+        pair is not None
+        and not isinstance(pair, str)
+        and timeframe is None
+    ):
+
+        signal_obj = pair
+
+        pair = getattr(
+            signal_obj,
+            "pair",
+            None,
+        )
+
+        timeframe = getattr(
+            signal_obj,
+            "timeframe",
+            None,
+        )
+
+        direction = getattr(
+            signal_obj,
+            "direction",
+            None,
+        )
+
+        probability = getattr(
+            signal_obj,
+            "probability",
+            None,
+        )
+
+        quality = getattr(
+            signal_obj,
+            "quality",
+            None,
+        )
+
+        entry_time = getattr(
+            signal_obj,
+            "entry_time",
+            None,
+        )
+
+        close_time = getattr(
+            signal_obj,
+            "close_time",
+            None,
+        )
+
+        reasons = getattr(
+            signal_obj,
+            "reasons",
+            None,
+        )
+
+        entry_price = getattr(
+            signal_obj,
+            "entry_price",
+            None,
+        )
+
+    # --------------------------------------------------------
+    # Validation
+    # --------------------------------------------------------
+
+    if pair is None:
+        raise ValueError(
+            "save_signal: pair отсутствует"
+        )
+
+    if timeframe is None:
+        raise ValueError(
+            "save_signal: timeframe отсутствует"
+        )
+
+    if direction is None:
+        raise ValueError(
+            "save_signal: direction отсутствует"
+        )
+
+    if probability is None:
+        raise ValueError(
+            "save_signal: probability отсутствует"
+        )
+
+    if quality is None:
+        raise ValueError(
+            "save_signal: quality отсутствует"
+        )
+
+    if entry_time is None:
+        raise ValueError(
+            "save_signal: entry_time отсутствует"
+        )
+
+    if close_time is None:
+        raise ValueError(
+            "save_signal: close_time отсутствует"
+        )
 
     async with Session() as session:
 
         signal = Signal(
             pair=str(pair),
             timeframe=int(timeframe),
-            direction=str(direction).upper(),
-            probability=float(probability),
-            quality=float(quality),
+            direction=str(
+                direction
+            ).upper(),
+            probability=float(
+                probability
+            ),
+            quality=float(
+                quality
+            ),
             entry_time=entry_time,
             close_time=close_time,
             status="PENDING",
@@ -564,10 +688,14 @@ async def save_signal(
 
         await session.commit()
 
-        await session.refresh(signal)
+        await session.refresh(
+            signal
+        )
 
         logger.info(
-            "[SIGNAL] Saved id=%s pair=%s tf=%s direction=%s entry=%s close=%s price=%s",
+            "[SIGNAL] Saved id=%s "
+            "pair=%s tf=%s direction=%s "
+            "entry=%s close=%s price=%s",
             signal.id,
             signal.pair,
             signal.timeframe,
@@ -730,7 +858,8 @@ async def settle_signal_by_price(
             await session.commit()
 
             logger.info(
-                "[RESULT] signal=%s DRAW entry=%s close=%s",
+                "[RESULT] signal=%s DRAW "
+                "entry=%s close=%s",
                 signal_id,
                 entry_price,
                 close_price,
@@ -765,7 +894,8 @@ async def settle_signal_by_price(
         else:
 
             logger.warning(
-                "[RESULT] signal=%s unknown direction=%s",
+                "[RESULT] signal=%s "
+                "unknown direction=%s",
                 signal_id,
                 direction,
             )
@@ -779,7 +909,8 @@ async def settle_signal_by_price(
         await session.commit()
 
         logger.info(
-            "[RESULT] signal=%s %s entry=%s close=%s direction=%s",
+            "[RESULT] signal=%s %s "
+            "entry=%s close=%s direction=%s",
             signal_id,
             result,
             entry_price,
@@ -848,25 +979,24 @@ async def get_signal_stats():
             or 0
         )
 
-        decided = (
-            int(wins)
-            + int(losses)
-        )
+        wins = int(wins)
+        losses = int(losses)
+        draws = int(draws)
+
+        decided = wins + losses
 
         winrate = (
-            float(wins)
-            / float(decided)
-            * 100.0
+            wins / decided * 100.0
             if decided
             else None
         )
 
         return {
             "total": int(total),
-            "wins": int(wins),
-            "losses": int(losses),
-            "draws": int(draws),
-            "decided": int(decided),
+            "wins": wins,
+            "losses": losses,
+            "draws": draws,
+            "decided": decided,
             "winrate": winrate,
             "reliable": (
                 decided >= MIN_HISTORY_SAMPLE
@@ -946,9 +1076,7 @@ async def get_pair_stats():
                 row.draws or 0
             )
 
-            decided = (
-                wins + losses
-            )
+            decided = wins + losses
 
             winrate = (
                 wins / decided * 100.0
@@ -978,8 +1106,7 @@ async def get_pair_stats():
 
 
 # ============================================================
-# DETAILED STATS
-# PAIR + TIMEFRAME + DIRECTION
+# PROFILE WINRATE
 # ============================================================
 
 async def get_signal_profile_stats(
@@ -1002,7 +1129,9 @@ async def get_signal_profile_stats(
                     )
                 ).where(
                     Signal.pair == pair,
-                    Signal.timeframe == int(timeframe),
+                    Signal.timeframe == int(
+                        timeframe
+                    ),
                     Signal.direction == direction,
                     Signal.result == "WIN",
                 )
@@ -1018,7 +1147,9 @@ async def get_signal_profile_stats(
                     )
                 ).where(
                     Signal.pair == pair,
-                    Signal.timeframe == int(timeframe),
+                    Signal.timeframe == int(
+                        timeframe
+                    ),
                     Signal.direction == direction,
                     Signal.result == "LOSS",
                 )
@@ -1034,7 +1165,9 @@ async def get_signal_profile_stats(
                     )
                 ).where(
                     Signal.pair == pair,
-                    Signal.timeframe == int(timeframe),
+                    Signal.timeframe == int(
+                        timeframe
+                    ),
                     Signal.direction == direction,
                     Signal.result == "DRAW",
                 )
@@ -1046,9 +1179,7 @@ async def get_signal_profile_stats(
         losses = int(losses)
         draws = int(draws)
 
-        decided = (
-            wins + losses
-        )
+        decided = wins + losses
 
         winrate = (
             wins / decided * 100.0
@@ -1066,14 +1197,13 @@ async def get_signal_profile_stats(
             "decided": decided,
             "winrate": winrate,
             "reliable": (
-                decided
-                >= MIN_HISTORY_SAMPLE
+                decided >= MIN_HISTORY_SAMPLE
             ),
         }
 
 
 # ============================================================
-# ALL PROFILE STATS
+# ALL PROFILES
 # ============================================================
 
 async def get_all_profile_stats():
@@ -1130,7 +1260,7 @@ async def get_all_profile_stats():
 
         rows = result.all()
 
-        stats = []
+        profiles = []
 
         for row in rows:
 
@@ -1146,9 +1276,7 @@ async def get_all_profile_stats():
                 row.draws or 0
             )
 
-            decided = (
-                wins + losses
-            )
+            decided = wins + losses
 
             winrate = (
                 wins / decided * 100.0
@@ -1156,15 +1284,13 @@ async def get_all_profile_stats():
                 else None
             )
 
-            stats.append(
+            profiles.append(
                 {
                     "pair": row.pair,
                     "timeframe": int(
                         row.timeframe
                     ),
-                    "direction": str(
-                        row.direction
-                    ).upper(),
+                    "direction": row.direction,
                     "wins": wins,
                     "losses": losses,
                     "draws": draws,
@@ -1177,35 +1303,4 @@ async def get_all_profile_stats():
                 }
             )
 
-        return stats
-
-
-# ============================================================
-# RECENT SIGNALS
-# ============================================================
-
-async def get_recent_signals(
-    limit: int = 20,
-):
-
-    limit = max(
-        1,
-        min(
-            int(limit),
-            100,
-        ),
-    )
-
-    async with Session() as session:
-
-        result = await session.execute(
-            select(Signal)
-            .order_by(
-                Signal.entry_time.desc()
-            )
-            .limit(limit)
-        )
-
-        return list(
-            result.scalars().all()
-        )
+        return profiles
