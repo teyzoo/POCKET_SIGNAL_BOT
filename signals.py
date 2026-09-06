@@ -15,8 +15,7 @@ class SignalResult:
     timeframe: int
     direction: str
 
-    # НЕ winrate.
-    # Только техническая оценка текущей ситуации.
+    # Это техническая уверенность, НЕ WINRATE.
     probability: float
 
     # Техническое качество сигнала.
@@ -28,7 +27,46 @@ class SignalResult:
     # Плановое время окончания экспирации.
     close_time: datetime
 
+    # Цена последней полностью закрытой M1-свечи
+    # на момент формирования сигнала.
+    entry_price: float | None
+
     reasons: list[str]
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _last_closed_m1(
+    candles: list[Candle],
+    moment: datetime | None = None,
+) -> Candle | None:
+
+    if not candles:
+        return None
+
+    moment = _utc_datetime(
+        moment or datetime.now(timezone.utc)
+    )
+
+    closed = []
+
+    for candle in candles:
+        candle_time = _utc_datetime(candle.time)
+
+        if candle_time + timedelta(minutes=1) <= moment:
+            closed.append(candle)
+
+    if not closed:
+        return None
+
+    return max(
+        closed,
+        key=lambda x: _utc_datetime(x.time),
+    )
 
 
 # ============================================================
@@ -223,13 +261,15 @@ def aggregate_candles(
 
     candles = sorted(
         candles,
-        key=lambda x: x.time,
+        key=lambda x: _utc_datetime(x.time),
     )
 
     if timeframe <= 1:
+
         result = list(candles)
 
     else:
+
         seconds = timeframe * 60
 
         buckets: dict[
@@ -240,7 +280,9 @@ def aggregate_candles(
         for candle in candles:
 
             timestamp = int(
-                candle.time.timestamp()
+                _utc_datetime(
+                    candle.time
+                ).timestamp()
             )
 
             bucket = (
@@ -258,7 +300,7 @@ def aggregate_candles(
 
             group = sorted(
                 buckets[bucket],
-                key=lambda x: x.time,
+                key=lambda x: _utc_datetime(x.time),
             )
 
             if not group:
@@ -287,21 +329,17 @@ def aggregate_candles(
                 )
             )
 
-    # Только полностью закрытые свечи.
-    now = datetime.now(
-        timezone.utc
-    )
+    # Убираем последнюю свечу, если она ещё не закрылась.
+    now = datetime.now(timezone.utc)
 
-    candle_seconds = (
-        timeframe * 60
-    )
+    candle_seconds = timeframe * 60
 
     if result:
 
         last = result[-1]
 
         candle_close = (
-            last.time
+            _utc_datetime(last.time)
             + timedelta(
                 seconds=candle_seconds
             )
@@ -332,6 +370,29 @@ class SignalEngine:
 
         if timeframe not in config.timeframes:
             return None
+
+        if not candles:
+            return None
+
+        # ----------------------------------------------------
+        # Вход фиксируется ДО расчёта результата.
+        # ----------------------------------------------------
+
+        entry_time = datetime.now(
+            timezone.utc
+        )
+
+        entry_candle = _last_closed_m1(
+            candles,
+            entry_time,
+        )
+
+        if entry_candle is None:
+            return None
+
+        entry_price = float(
+            entry_candle.close
+        )
 
         candles_tf = aggregate_candles(
             candles,
@@ -403,9 +464,7 @@ class SignalEngine:
         ema12 = ema(close, 12)
         ema26 = ema(close, 26)
 
-        macd = (
-            ema12 - ema26
-        )
+        macd = ema12 - ema26
 
         valid_macd = macd[
             np.isfinite(macd)
@@ -476,8 +535,11 @@ class SignalEngine:
         )
 
         if highest == lowest:
+
             stochastic = 50.0
+
         else:
+
             stochastic = (
                 100.0
                 * (price - lowest)
@@ -594,10 +656,7 @@ class SignalEngine:
         up_reasons: list[str] = []
         down_reasons: list[str] = []
 
-        # ====================================================
         # EMA
-        # ====================================================
-
         if (
             np.isfinite(ema9[-1])
             and np.isfinite(ema21[-1])
@@ -636,10 +695,7 @@ class SignalEngine:
 
                 down += 7
 
-        # ====================================================
-        # EMA SLOPE
-        # ====================================================
-
+        # EMA slope
         if (
             len(ema21) >= 4
             and np.isfinite(ema21[-1])
@@ -667,17 +723,12 @@ class SignalEngine:
                     "EMA 21 имеет отрицательный наклон"
                 )
 
-        # ====================================================
         # RSI
-        # ====================================================
-
         current_rsi = float(
             rsi14[-1]
         )
 
-        if np.isfinite(
-            current_rsi
-        ):
+        if np.isfinite(current_rsi):
 
             if 52 <= current_rsi <= 68:
 
@@ -711,10 +762,7 @@ class SignalEngine:
                     f"RSI {current_rsi:.1f} — перекупленность"
                 )
 
-        # ====================================================
         # MACD
-        # ====================================================
-
         if macd_value > macd_signal:
 
             up += 15
@@ -731,10 +779,7 @@ class SignalEngine:
                 "MACD подтверждает DOWN"
             )
 
-        # ====================================================
-        # MACD HISTOGRAM
-        # ====================================================
-
+        # MACD histogram
         histogram = (
             macd_value
             - macd_signal
@@ -769,10 +814,7 @@ class SignalEngine:
                 "MACD histogram усиливается вниз"
             )
 
-        # ====================================================
-        # BOLLINGER
-        # ====================================================
-
+        # Bollinger
         if price <= bb_lower:
 
             up += 10
@@ -797,10 +839,7 @@ class SignalEngine:
 
             down += 4
 
-        # ====================================================
-        # STOCHASTIC
-        # ====================================================
-
+        # Stochastic
         if stochastic <= 20:
 
             up += 10
@@ -825,10 +864,7 @@ class SignalEngine:
 
             down += 4
 
-        # ====================================================
-        # MOMENTUM
-        # ====================================================
-
+        # Momentum
         if momentum > 0:
 
             up += 10
@@ -845,22 +881,14 @@ class SignalEngine:
                 "Отрицательный momentum"
             )
 
-        # ====================================================
-        # SHORT MOMENTUM
-        # ====================================================
-
+        # Short momentum
         if short_momentum > 0:
-
             up += 5
 
         elif short_momentum < 0:
-
             down += 5
 
-        # ====================================================
-        # SUPPORT / RESISTANCE
-        # ====================================================
-
+        # Support / resistance
         if position <= 0.18:
 
             up += 10
@@ -877,10 +905,7 @@ class SignalEngine:
                 "Цена возле сопротивления"
             )
 
-        # ====================================================
-        # CANDLE CONFIRMATION
-        # ====================================================
-
+        # Candle confirmation
         if body_ratio >= 0.55:
 
             if bullish_candle:
@@ -899,10 +924,7 @@ class SignalEngine:
                     "Сильная медвежья свеча"
                 )
 
-        # ====================================================
-        # VOLUME
-        # ====================================================
-
+        # Volume
         if volume_ratio >= 1.10:
 
             if up > down:
@@ -921,10 +943,7 @@ class SignalEngine:
                     "Объём выше среднего"
                 )
 
-        # ====================================================
-        # VOLATILITY
-        # ====================================================
-
+        # Volatility
         atr_percent = (
             current_atr
             / price
@@ -937,10 +956,7 @@ class SignalEngine:
         if atr_percent > 5.0:
             return None
 
-        # ====================================================
-        # DIRECTION
-        # ====================================================
-
+        # Direction
         if up > down:
 
             direction = "UP"
@@ -959,10 +975,7 @@ class SignalEngine:
 
             return None
 
-        # ====================================================
-        # GAP
-        # ====================================================
-
+        # Gap
         gap = (
             score
             - opposite
@@ -971,10 +984,7 @@ class SignalEngine:
         if gap < 15:
             return None
 
-        # ====================================================
-        # QUALITY
-        # ====================================================
-
+        # Quality
         quality = min(
             100.0,
             max(
@@ -1002,19 +1012,8 @@ class SignalEngine:
             ),
         )
 
-        # ====================================================
-        # TECHNICAL CONFIDENCE
-        # ====================================================
-        #
-        # ВАЖНО:
-        # НИКОГДА не называем это WINRATE.
-        #
-        # WINRATE будет считаться database.py
-        # только по реальным WIN/LOSS.
-        #
-        # Эта цифра показывает только силу текущего
-        # технического набора условий.
-
+        # Technical confidence.
+        # НЕ WINRATE.
         confirmation_count = len(
             reasons
         )
@@ -1042,10 +1041,7 @@ class SignalEngine:
             ),
         )
 
-        # ====================================================
-        # CONFIG FILTER
-        # ====================================================
-
+        # Config filter
         min_quality = float(
             getattr(
                 config,
@@ -1068,30 +1064,13 @@ class SignalEngine:
         if probability < min_probability:
             return None
 
-        # ====================================================
-        # ENTRY / CLOSE
-        # ====================================================
-        #
-        # Сигнал считается входом ПО ЗАЯВКЕ:
-        # момент создания сигнала = момент входа.
-        #
-        # Никакого искусственного ожидания следующей
-        # границы таймфрейма.
-
-        entry_time = datetime.now(
-            timezone.utc
-        )
-
+        # Close time.
         close_time = (
             entry_time
             + timedelta(
                 minutes=timeframe
             )
         )
-
-        # ====================================================
-        # REASONS
-        # ====================================================
 
         reasons = list(
             dict.fromkeys(
@@ -1122,19 +1101,16 @@ class SignalEngine:
             pair=pair,
             timeframe=timeframe,
             direction=direction,
-
             probability=round(
                 probability,
                 2,
             ),
-
             quality=round(
                 quality,
                 2,
             ),
-
             entry_time=entry_time,
             close_time=close_time,
-
+            entry_price=entry_price,
             reasons=reasons[:8],
         )
