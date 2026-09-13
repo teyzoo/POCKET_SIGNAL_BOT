@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 import uvicorn
@@ -29,6 +30,7 @@ from database import (
     get_access_users,
     get_pair_stats,
     get_pending_signals,
+    get_signal_profile_stats,
     get_user,
     init_db,
     save_signal,
@@ -37,8 +39,15 @@ from database import (
 )
 
 from market import PocketMarket
-from signals import SignalEngine
+from signals import (
+    MIN_WINRATE,
+    SignalEngine,
+)
 
+
+# ============================================================
+# LOGGING
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,9 +63,19 @@ logger = logging.getLogger(
     "POCKET_SIGNAL_BOT"
 )
 
+
+# ============================================================
+# TIME
+# ============================================================
+
 MSK = ZoneInfo(
     "Europe/Moscow"
 )
+
+
+# ============================================================
+# BOT
+# ============================================================
 
 bot = Bot(
     token=config.BOT_TOKEN,
@@ -68,9 +87,16 @@ bot = Bot(
 dp = Dispatcher()
 
 market = PocketMarket()
+
 engine = SignalEngine()
 
+
+# ============================================================
+# GLOBALS
+# ============================================================
+
 AUTO_SIGNALS = True
+
 MARKET_READY = False
 
 MARKET_CONNECT_LOCK = asyncio.Lock()
@@ -86,6 +112,10 @@ USER_SELECTED_PAIRS: dict[
 ] = {}
 
 
+# ============================================================
+# FASTAPI
+# ============================================================
+
 app = FastAPI(
     title="Pocket Option Signal Bot"
 )
@@ -100,7 +130,11 @@ async def root():
         "market_connected":
             market_is_connected(),
         "provider":
-            market.provider,
+            getattr(
+                market,
+                "provider",
+                "unknown",
+            ),
     }
 
 
@@ -113,7 +147,11 @@ async def health():
         "market_connected":
             market_is_connected(),
         "provider":
-            market.provider,
+            getattr(
+                market,
+                "provider",
+                "unknown",
+            ),
         "time":
             datetime.now(
                 timezone.utc
@@ -121,7 +159,17 @@ async def health():
     }
 
 
+# ============================================================
+# MARKET
+# ============================================================
+
 def market_is_connected() -> bool:
+
+    client = getattr(
+        market,
+        "client",
+        None,
+    )
 
     return bool(
         getattr(
@@ -129,12 +177,8 @@ def market_is_connected() -> bool:
             "connected",
             False,
         )
-        and getattr(
-            market,
-            "client",
-            None,
-        ) is not None
-        and not market.client.closed
+        and client is not None
+        and not client.closed
     )
 
 
@@ -143,13 +187,17 @@ async def ensure_market_ready() -> bool:
     global MARKET_READY
 
     if market_is_connected():
+
         MARKET_READY = True
+
         return True
 
     async with MARKET_CONNECT_LOCK:
 
         if market_is_connected():
+
             MARKET_READY = True
+
             return True
 
         try:
@@ -165,7 +213,9 @@ async def ensure_market_ready() -> bool:
             )
 
             if not connected:
+
                 MARKET_READY = False
+
                 return False
 
             MARKET_READY = True
@@ -173,7 +223,11 @@ async def ensure_market_ready() -> bool:
             logger.info(
                 "[MARKET] "
                 "✅ Подключено: %s",
-                market.provider,
+                getattr(
+                    market,
+                    "provider",
+                    "unknown",
+                ),
             )
 
             return True
@@ -184,7 +238,7 @@ async def ensure_market_ready() -> bool:
 
             logger.error(
                 "[MARKET] "
-                "❌ Общий таймаут подключения"
+                "❌ Таймаут подключения"
             )
 
             return False
@@ -202,6 +256,10 @@ async def ensure_market_ready() -> bool:
             return False
 
 
+# ============================================================
+# CONFIG HELPERS
+# ============================================================
+
 def get_config_pairs():
 
     pairs = getattr(
@@ -211,6 +269,7 @@ def get_config_pairs():
     )
 
     if not pairs:
+
         raise RuntimeError(
             "В config.py отсутствует pairs"
         )
@@ -227,6 +286,7 @@ def get_config_timeframes():
     )
 
     if not values:
+
         raise RuntimeError(
             "В config.py отсутствует timeframes"
         )
@@ -236,11 +296,14 @@ def get_config_timeframes():
     for value in values:
 
         try:
+
             value = int(value)
+
         except (
             TypeError,
             ValueError,
         ):
+
             continue
 
         if value > 0:
@@ -249,7 +312,9 @@ def get_config_timeframes():
     return result
 
 
-def pair_name(symbol: str) -> str:
+def pair_name(
+    symbol: str,
+) -> str:
 
     for name, internal in (
         get_config_pairs()
@@ -274,6 +339,7 @@ def direction_text(
         "CALL",
         "BUY",
     }:
+
         return "🟢 ВВЕРХ"
 
     if value in {
@@ -281,16 +347,22 @@ def direction_text(
         "PUT",
         "SELL",
     }:
+
         return "🔴 ВНИЗ"
 
     return value
 
+
+# ============================================================
+# TIME HELPERS
+# ============================================================
 
 def utc_time(
     value: datetime,
 ) -> datetime:
 
     if value.tzinfo is None:
+
         return value.replace(
             tzinfo=timezone.utc
         )
@@ -312,6 +384,10 @@ def msk_time(
         "%H:%M"
     )
 
+
+# ============================================================
+# CANDLE HELPERS
+# ============================================================
 
 def candle_close_at_or_before(
     candles,
@@ -338,7 +414,10 @@ def candle_close_at_or_before(
         )
 
         if close <= target_time:
-            valid.append(candle)
+
+            valid.append(
+                candle
+            )
 
     if not valid:
         return None
@@ -353,6 +432,10 @@ def candle_close_at_or_before(
         candle.close
     )
 
+
+# ============================================================
+# STATS
+# ============================================================
 
 async def pair_history_text(
     pair: str,
@@ -375,11 +458,18 @@ async def pair_history_text(
             if decided <= 0:
                 break
 
+            reliability = (
+                "надёжная выборка"
+                if item["reliable"]
+                else "малая выборка"
+            )
+
             return (
-                f"📊 <b>История:</b> "
+                f"📊 <b>Реальная история:</b> "
                 f"{item['winrate']:.1f}% "
                 f"({item['wins']} WIN / "
-                f"{item['losses']} LOSS)"
+                f"{item['losses']} LOSS) "
+                f"— {reliability}"
             )
 
     except Exception as exc:
@@ -390,10 +480,14 @@ async def pair_history_text(
         )
 
     return (
-        "📊 <b>История:</b> "
+        "📊 <b>Реальная история:</b> "
         "недостаточно закрытых сигналов"
     )
 
+
+# ============================================================
+# SIGNAL FORMAT
+# ============================================================
 
 async def format_signal(
     signal,
@@ -459,7 +553,7 @@ async def format_signal(
         f"⏱ <b>Экспирация:</b> "
         f"{signal.timeframe} мин\n"
 
-        f"🎯 <b>Техническая уверенность:</b> "
+        f"📊 <b>Историческая оценка:</b> "
         f"{float(signal.probability):.1f}%\n"
 
         f"⭐ <b>Quality Score:</b> "
@@ -484,12 +578,18 @@ async def format_signal(
 
     text += (
         "\n\n"
-        "⚠️ Техническая оценка "
-        "не является гарантией результата."
+        f"🛡 <b>Фильтр:</b> "
+        f"не ниже {MIN_WINRATE:.0f}%\n\n"
+        "⚠️ Историческая оценка "
+        "не гарантирует будущий результат."
     )
 
     return text
 
+
+# ============================================================
+# KEYBOARDS
+# ============================================================
 
 def main_keyboard():
 
@@ -547,7 +647,9 @@ def signal_pair_keyboard():
         )
 
         if len(row) == 2:
+
             rows.append(row)
+
             row = []
 
     if row:
@@ -570,6 +672,7 @@ def signal_pair_keyboard():
 def signal_time_keyboard():
 
     rows = []
+
     row = []
 
     for timeframe in (
@@ -586,7 +689,9 @@ def signal_time_keyboard():
         )
 
         if len(row) == 3:
+
             rows.append(row)
+
             row = []
 
     if row:
@@ -615,11 +720,16 @@ def signal_time_keyboard():
     )
 
 
+# ============================================================
+# USER LOCK
+# ============================================================
+
 def get_user_lock(
     user_id: int,
 ):
 
     if user_id not in USER_ANALYSIS_LOCKS:
+
         USER_ANALYSIS_LOCKS[
             user_id
         ] = asyncio.Lock()
@@ -628,6 +738,10 @@ def get_user_lock(
         user_id
     ]
 
+
+# ============================================================
+# SCAN
+# ============================================================
 
 async def scan_pair(
     pair: str,
@@ -647,6 +761,15 @@ async def scan_pair(
         1,
         limit,
     )
+
+    if not candles:
+
+        logger.warning(
+            "[SIGNAL] Нет свечей: %s",
+            pair,
+        )
+
+        return None
 
     timeframes = (
         [timeframe]
@@ -685,11 +808,11 @@ async def scan_pair(
             best = signal
 
         elif (
-            signal.quality,
             signal.probability,
+            signal.quality,
         ) > (
-            best.quality,
             best.probability,
+            best.quality,
         ):
 
             best = signal
@@ -703,6 +826,7 @@ async def scan_market(
 ):
 
     if not await ensure_market_ready():
+
         return None, (
             "❌ <b>Рынок недоступен.</b>\n\n"
             "Источник рынка не ответил."
@@ -742,11 +866,11 @@ async def scan_market(
                 best = signal
 
             elif (
-                signal.quality,
                 signal.probability,
+                signal.quality,
             ) > (
-                best.quality,
                 best.probability,
+                best.quality,
             ):
 
                 best = signal
@@ -761,17 +885,31 @@ async def scan_market(
 
     if best is None:
 
+        minimum = getattr(
+            config,
+            "min_probability",
+            MIN_WINRATE,
+        )
+
+        minimum = max(
+            float(minimum),
+            MIN_WINRATE,
+        )
+
         return None, (
             "⚪ <b>Сильного сигнала сейчас нет.</b>\n\n"
-            "Требование: "
-            f"от {config.min_probability:.0f}%.\n\n"
-            "Я не буду выдавать слабый "
-            "сигнал только ради того, "
-            "чтобы что-то показать."
+            f"Жёсткий фильтр: "
+            f"от {minimum:.0f}%.\n\n"
+            "Слабый сигнал специально "
+            "не выдаю."
         )
 
     return best, None
 
+
+# ============================================================
+# START
+# ============================================================
 
 @dp.message(
     CommandStart()
@@ -798,6 +936,10 @@ async def start_handler(
         reply_markup=main_keyboard(),
     )
 
+
+# ============================================================
+# SIGNAL BUTTON
+# ============================================================
 
 @dp.callback_query(
     F.data == "signal"
@@ -844,6 +986,10 @@ async def pair_selected(
     )
 
 
+# ============================================================
+# TIMEFRAME
+# ============================================================
+
 @dp.callback_query(
     F.data.startswith("sigt:")
 )
@@ -888,13 +1034,19 @@ async def timeframe_selected(
         )[1]
 
         if raw_timeframe == "ANY":
+
             timeframe = None
+
         else:
+
             try:
+
                 timeframe = int(
                     raw_timeframe
                 )
+
             except ValueError:
+
                 timeframe = None
 
         await callback.message.edit_text(
@@ -922,9 +1074,16 @@ async def timeframe_selected(
 
         try:
 
-            await save_signal(
+            saved_id = await save_signal(
                 signal
             )
+
+            if saved_id is None:
+
+                logger.info(
+                    "[DATABASE] "
+                    "Дубликат сигнала не сохранён"
+                )
 
         except Exception as exc:
 
@@ -943,6 +1102,10 @@ async def timeframe_selected(
             reply_markup=main_keyboard(),
         )
 
+
+# ============================================================
+# AUTO TOGGLE
+# ============================================================
 
 @dp.callback_query(
     F.data == "auto_toggle"
@@ -973,6 +1136,10 @@ async def auto_toggle(
     )
 
 
+# ============================================================
+# SETTINGS
+# ============================================================
+
 @dp.callback_query(
     F.data == "settings"
 )
@@ -992,15 +1159,32 @@ async def settings_handler(
         else True
     )
 
+    configured_min = getattr(
+        config,
+        "min_probability",
+        MIN_WINRATE,
+    )
+
+    effective_min = max(
+        float(configured_min),
+        MIN_WINRATE,
+    )
+
+    quality = getattr(
+        config,
+        "min_signal_score",
+        75,
+    )
+
     await callback.message.edit_text(
         (
             "⚙️ <b>НАСТРОЙКИ</b>\n\n"
             f"Автосигналы: "
             f"{'🟢 ВКЛ' if auto else '🔴 ВЫКЛ'}\n\n"
-            f"Минимальная уверенность: "
-            f"{config.min_probability:.0f}%\n"
+            f"Минимальная историческая "
+            f"оценка: {effective_min:.0f}%\n"
             f"Минимальный Quality: "
-            f"{config.min_signal_score:.0f}"
+            f"{float(quality):.0f}"
         ),
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
@@ -1057,6 +1241,10 @@ async def user_auto(
     )
 
 
+# ============================================================
+# BACK
+# ============================================================
+
 @dp.callback_query(
     F.data == "back_main"
 )
@@ -1075,6 +1263,10 @@ async def back_main(
     )
 
 
+# ============================================================
+# SETTLEMENT
+# ============================================================
+
 async def settlement_loop():
 
     logger.info(
@@ -1086,7 +1278,15 @@ async def settlement_loop():
 
         try:
 
-            pending = await get_pending_signals()
+            if not await ensure_market_ready():
+
+                await asyncio.sleep(15)
+
+                continue
+
+            pending = (
+                await get_pending_signals()
+            )
 
             now = datetime.now(
                 timezone.utc
@@ -1106,10 +1306,15 @@ async def settlement_loop():
 
                 try:
 
-                    candles = await market.get_candles(
-                        signal.pair,
-                        1,
-                        30,
+                    candles = (
+                        await market.get_candles(
+                            signal.pair,
+                            1,
+                            max(
+                                60,
+                                signal.timeframe + 10,
+                            ),
+                        )
                     )
 
                     close_price = (
@@ -1122,10 +1327,21 @@ async def settlement_loop():
                     if close_price is None:
                         continue
 
-                    await settle_signal_by_price(
-                        signal.id,
-                        close_price,
+                    result = (
+                        await settle_signal_by_price(
+                            signal.id,
+                            close_price,
+                        )
                     )
+
+                    if result:
+
+                        logger.info(
+                            "[SETTLEMENT] "
+                            "%s -> %s",
+                            signal.id,
+                            result,
+                        )
 
                 except Exception as exc:
 
@@ -1146,10 +1362,15 @@ async def settlement_loop():
         await asyncio.sleep(15)
 
 
+# ============================================================
+# AUTO SIGNAL LOOP
+# ============================================================
+
 async def auto_signal_loop():
 
     logger.info(
-        "[AUTO] Автоматические сигналы запущены"
+        "[AUTO] "
+        "Автоматические сигналы запущены"
     )
 
     while True:
@@ -1158,7 +1379,9 @@ async def auto_signal_loop():
 
             if AUTO_SIGNALS:
 
-                users = await get_access_users()
+                users = (
+                    await get_access_users()
+                )
 
                 pairs = get_config_pairs()
 
@@ -1168,9 +1391,11 @@ async def auto_signal_loop():
 
                     try:
 
-                        signal = await scan_pair(
-                            pair,
-                            None,
+                        signal = (
+                            await scan_pair(
+                                pair,
+                                None,
+                            )
                         )
 
                         if signal is None:
@@ -1181,11 +1406,11 @@ async def auto_signal_loop():
                             best = signal
 
                         elif (
-                            signal.quality,
                             signal.probability,
+                            signal.quality,
                         ) > (
-                            best.quality,
                             best.probability,
+                            best.quality,
                         ):
 
                             best = signal
@@ -1201,10 +1426,22 @@ async def auto_signal_loop():
                 if best is not None:
 
                     try:
-                        await save_signal(
-                            best
+
+                        saved_id = (
+                            await save_signal(
+                                best
+                            )
                         )
+
+                        if saved_id is None:
+
+                            logger.info(
+                                "[AUTO] "
+                                "Дубликат сигнала"
+                            )
+
                     except Exception as exc:
+
                         logger.warning(
                             "[AUTO] "
                             "save_signal: %s",
@@ -1243,38 +1480,52 @@ async def auto_signal_loop():
                 exc,
             )
 
-        # Следующая проверка.
         await asyncio.sleep(
             max(
                 20,
                 int(
-                    config.scan_interval
+                    getattr(
+                        config,
+                        "scan_interval",
+                        30,
+                    )
                 ),
             )
         )
 
+
+# ============================================================
+# STARTUP
+# ============================================================
 
 async def startup():
 
     await init_db()
 
     logger.info(
-        "[BOT] 🚀 Telegram bot запущен"
+        "[BOT] 🚀 "
+        "Telegram bot запущен"
     )
 
 
 async def shutdown():
 
     try:
+
         await market.close()
+
     except Exception:
+
         pass
 
     await close_database()
 
     try:
+
         await bot.session.close()
+
     except Exception:
+
         pass
 
 
@@ -1299,10 +1550,15 @@ async def bot_runner():
     finally:
 
         settlement_task.cancel()
+
         auto_task.cancel()
 
         await shutdown()
 
+
+# ============================================================
+# RUN
+# ============================================================
 
 def run():
 
@@ -1313,23 +1569,20 @@ def run():
 
 if __name__ == "__main__":
 
-    import threading
-
     def run_api():
+
         uvicorn.run(
             app,
             host="0.0.0.0",
-            port=(
-                __import__(
-                    "os"
-                ).getenv(
-                    "PORT",
-                    "10000",
-                )
+            port=os.getenv(
+                "PORT",
+                "10000",
             ),
         )
 
-    api_thread = threading.Thread(
+    api_thread = __import__(
+        "threading"
+    ).Thread(
         target=run_api,
         daemon=True,
     )
