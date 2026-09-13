@@ -10,30 +10,29 @@ from market import Candle
 
 
 # ============================================================
-# НАСТРОЙКИ ЧЕСТНОГО СИГНАЛА
+# ЧЕСТНЫЙ SIGNAL ENGINE
 # ============================================================
 
 MIN_WINRATE = 80.0
 
-# Минимум исторических аналогичных ситуаций.
+# Минимальное количество исторических аналогов.
 MIN_HISTORY = 30
 
-# Для дополнительной защиты от случайных 100%.
+# Минимальное количество WIN.
 MIN_WINS = 24
 
-# Максимальное расстояние между текущим score
-# и историческим score.
-SCORE_TOLERANCE = 7.5
+# Насколько текущий technical score должен быть похож
+# на исторический score.
+SCORE_TOLERANCE = 8.0
 
-# Не выдавать сигнал, если направления слишком близки.
+# Минимальное преимущество направления.
 MIN_DIRECTION_EDGE = 12.0
 
-# Минимальное качество технической картины.
-MIN_TECHNICAL_SCORE = 72.0
+# Минимальное техническое качество.
+MIN_TECHNICAL_SCORE = 75.0
 
-# Минимальная разница между быстрым и медленным
-# моментумом.
-MIN_MOMENTUM_EDGE = 0.0
+# Максимальное число исторических точек.
+MAX_HISTORY_POINTS = 350
 
 
 # ============================================================
@@ -46,13 +45,11 @@ class SignalResult:
     timeframe: int
     direction: str
 
-    # ВАЖНО:
-    # probability теперь означает
-    # консервативную историческую вероятность,
-    # а НЕ просто сумму индикаторов.
+    # Это НЕ сумма индикаторов.
+    # Это консервативная историческая оценка.
     probability: float
 
-    # Техническое качество setup.
+    # Отдельно техническое качество.
     quality: float
 
     entry_time: datetime
@@ -67,27 +64,19 @@ class SignalResult:
 # TIME
 # ============================================================
 
-def _utc_datetime(
-    value: datetime,
-) -> datetime:
-
+def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(
-            tzinfo=timezone.utc
-        )
+        return value.replace(tzinfo=timezone.utc)
 
-    return value.astimezone(
-        timezone.utc
-    )
+    return value.astimezone(timezone.utc)
 
 
 def _next_minute(
     moment: datetime | None = None,
 ) -> datetime:
 
-    now = _utc_datetime(
-        moment
-        or datetime.now(timezone.utc)
+    now = _utc(
+        moment or datetime.now(timezone.utc)
     )
 
     return (
@@ -107,27 +96,25 @@ def _last_closed_m1(
     if not candles:
         return None
 
-    now = _utc_datetime(
-        moment
-        or datetime.now(timezone.utc)
+    now = _utc(
+        moment or datetime.now(timezone.utc)
     )
 
-    closed = [
-        candle
-        for candle in candles
-        if (
-            _utc_datetime(candle.time)
-            + timedelta(minutes=1)
-            <= now
-        )
-    ]
+    closed = []
+
+    for candle in candles:
+
+        start = _utc(candle.time)
+
+        if start + timedelta(minutes=1) <= now:
+            closed.append(candle)
 
     if not closed:
         return None
 
     return max(
         closed,
-        key=lambda x: _utc_datetime(x.time)
+        key=lambda x: _utc(x.time),
     )
 
 
@@ -135,10 +122,7 @@ def _last_closed_m1(
 # INDICATORS
 # ============================================================
 
-def ema(
-    values,
-    period: int,
-):
+def ema(values, period: int):
 
     values = np.asarray(
         values,
@@ -153,18 +137,14 @@ def ema(
     if len(values) < period:
         return result
 
-    alpha = 2.0 / (
-        period + 1
-    )
+    alpha = 2.0 / (period + 1.0)
 
     result[period - 1] = np.mean(
         values[:period]
     )
 
-    for i in range(
-        period,
-        len(values),
-    ):
+    for i in range(period, len(values)):
+
         result[i] = (
             alpha * values[i]
             + (1.0 - alpha)
@@ -253,10 +233,11 @@ def rsi(
 
         if avg_loss[i] == 0:
 
-            if avg_gain[i] > 0:
-                result[i] = 100.0
-            else:
-                result[i] = 50.0
+            result[i] = (
+                100.0
+                if avg_gain[i] > 0
+                else 50.0
+            )
 
         else:
 
@@ -279,6 +260,7 @@ def atr(
 ):
 
     if len(candles) < period + 1:
+
         return np.full(
             len(candles),
             np.nan,
@@ -307,12 +289,8 @@ def atr(
     tr = np.maximum(
         highs - lows,
         np.maximum(
-            np.abs(
-                highs - previous
-            ),
-            np.abs(
-                lows - previous
-            ),
+            np.abs(highs - previous),
+            np.abs(lows - previous),
         ),
     )
 
@@ -328,7 +306,7 @@ def atr(
 
 
 # ============================================================
-# CANDLE AGGREGATION
+# AGGREGATION
 # ============================================================
 
 def aggregate_candles(
@@ -343,11 +321,10 @@ def aggregate_candles(
 
     candles = sorted(
         candles,
-        key=lambda x: _utc_datetime(x.time),
+        key=lambda x: _utc(x.time),
     )
 
     if timeframe <= 1:
-
         result = list(candles)
 
     else:
@@ -359,9 +336,7 @@ def aggregate_candles(
         for candle in candles:
 
             timestamp = int(
-                _utc_datetime(
-                    candle.time
-                ).timestamp()
+                _utc(candle.time).timestamp()
             )
 
             bucket = (
@@ -379,8 +354,7 @@ def aggregate_candles(
 
             group = sorted(
                 buckets[bucket],
-                key=lambda x:
-                    _utc_datetime(x.time),
+                key=lambda x: _utc(x.time),
             )
 
             if not group:
@@ -409,19 +383,15 @@ def aggregate_candles(
                 )
             )
 
-    now = datetime.now(
-        timezone.utc
-    )
+    now = datetime.now(timezone.utc)
 
     if result:
 
         last = result[-1]
 
         if (
-            _utc_datetime(last.time)
-            + timedelta(
-                minutes=timeframe
-            )
+            _utc(last.time)
+            + timedelta(minutes=timeframe)
             > now
         ):
             result.pop()
@@ -430,16 +400,12 @@ def aggregate_candles(
 
 
 # ============================================================
-# TECHNICAL ANALYSIS
+# TECHNICAL SETUP
 # ============================================================
 
 def _technical_setup(
     data: list[Candle],
-) -> tuple[
-    str | None,
-    float,
-    list[str],
-]:
+) -> tuple[str | None, float, list[str]]:
 
     if len(data) < 60:
         return None, 0.0, []
@@ -478,20 +444,9 @@ def _technical_setup(
     # EMA
     # --------------------------------------------------------
 
-    ema9 = ema(
-        close,
-        9,
-    )
-
-    ema21 = ema(
-        close,
-        21,
-    )
-
-    ema50 = ema(
-        close,
-        50,
-    )
+    ema9 = ema(close, 9)
+    ema21 = ema(close, 21)
+    ema50 = ema(close, 50)
 
     if not (
         np.isfinite(ema9[-1])
@@ -504,41 +459,23 @@ def _technical_setup(
     # RSI
     # --------------------------------------------------------
 
-    rsi14 = rsi(
-        close,
-        14,
-    )
+    rsi14 = rsi(close, 14)
+    current_rsi = float(rsi14[-1])
 
-    current_rsi = float(
-        rsi14[-1]
-    )
-
-    if not np.isfinite(
-        current_rsi
-    ):
+    if not np.isfinite(current_rsi):
         return None, 0.0, []
 
     # --------------------------------------------------------
     # ATR
     # --------------------------------------------------------
 
-    atr14 = atr(
-        data,
-        14,
-    )
+    atr14 = atr(data, 14)
 
-    if not np.isfinite(
-        atr14[-1]
-    ):
+    if not np.isfinite(atr14[-1]):
         return None, 0.0, []
 
-    current_atr = float(
-        atr14[-1]
-    )
-
-    price = float(
-        close[-1]
-    )
+    current_atr = float(atr14[-1])
+    price = float(close[-1])
 
     if current_atr <= 0:
         return None, 0.0, []
@@ -549,11 +486,9 @@ def _technical_setup(
         * 100.0
     )
 
-    # Мёртвый рынок.
     if atr_percent < 0.01:
         return None, 0.0, []
 
-    # Аномальная волатильность.
     if atr_percent > 5.0:
         return None, 0.0, []
 
@@ -561,20 +496,10 @@ def _technical_setup(
     # MACD
     # --------------------------------------------------------
 
-    ema12 = ema(
-        close,
-        12,
-    )
+    ema12 = ema(close, 12)
+    ema26 = ema(close, 26)
 
-    ema26 = ema(
-        close,
-        26,
-    )
-
-    macd = (
-        ema12
-        - ema26
-    )
+    macd = ema12 - ema26
 
     valid_macd = macd[
         np.isfinite(macd)
@@ -593,9 +518,7 @@ def _technical_setup(
     ):
         return None, 0.0, []
 
-    macd_value = float(
-        macd[-1]
-    )
+    macd_value = float(macd[-1])
 
     macd_signal = float(
         macd_signal_array[-1]
@@ -643,21 +566,13 @@ def _technical_setup(
     )
 
     if highest == lowest:
-
         stochastic = 50.0
 
     else:
-
         stochastic = (
             100.0
-            * (
-                price
-                - lowest
-            )
-            / (
-                highest
-                - lowest
-            )
+            * (price - lowest)
+            / (highest - lowest)
         )
 
     # --------------------------------------------------------
@@ -729,14 +644,12 @@ def _technical_setup(
         body_ratio = 0.0
         close_position = 0.5
 
-    bullish_candle = (
-        candle.close
-        > candle.open
+    bullish = (
+        candle.close > candle.open
     )
 
-    bearish_candle = (
-        candle.close
-        < candle.open
+    bearish = (
+        candle.close < candle.open
     )
 
     # --------------------------------------------------------
@@ -781,7 +694,7 @@ def _technical_setup(
     )
 
     # --------------------------------------------------------
-    # SCORES
+    # SCORE
     # --------------------------------------------------------
 
     up = 0.0
@@ -790,134 +703,92 @@ def _technical_setup(
     reasons_up: list[str] = []
     reasons_down: list[str] = []
 
-    # ========================================================
-    # EMA TREND
-    # ========================================================
+    # EMA
+    if ema9[-1] > ema21[-1] > ema50[-1]:
 
-    if (
-        ema9[-1]
-        > ema21[-1]
-        > ema50[-1]
-    ):
-
-        up += 18.0
-
+        up += 18
         reasons_up.append(
             "EMA9 > EMA21 > EMA50"
         )
 
-    elif (
-        ema9[-1]
-        < ema21[-1]
-        < ema50[-1]
-    ):
+    elif ema9[-1] < ema21[-1] < ema50[-1]:
 
-        down += 18.0
-
+        down += 18
         reasons_down.append(
             "EMA9 < EMA21 < EMA50"
         )
 
     elif ema9[-1] > ema21[-1]:
 
-        up += 8.0
-
+        up += 8
         reasons_up.append(
             "EMA9 выше EMA21"
         )
 
     elif ema9[-1] < ema21[-1]:
 
-        down += 8.0
-
+        down += 8
         reasons_down.append(
             "EMA9 ниже EMA21"
         )
 
-    # ========================================================
-    # EMA SLOPE
-    # ========================================================
-
+    # EMA slope
     if ema21_slope > 0:
 
-        up += 8.0
-
+        up += 8
         reasons_up.append(
             "EMA21 растёт"
         )
 
     elif ema21_slope < 0:
 
-        down += 8.0
-
+        down += 8
         reasons_down.append(
             "EMA21 снижается"
         )
 
     if ema50_slope > 0:
-
-        up += 5.0
+        up += 5
 
     elif ema50_slope < 0:
+        down += 5
 
-        down += 5.0
-
-    # ========================================================
     # RSI
-    # ========================================================
+    if 53 <= current_rsi <= 67:
 
-    if 53.0 <= current_rsi <= 67.0:
-
-        up += 12.0
-
+        up += 12
         reasons_up.append(
             f"RSI {current_rsi:.1f}"
         )
 
-    elif 33.0 <= current_rsi <= 47.0:
+    elif 33 <= current_rsi <= 47:
 
-        down += 12.0
-
+        down += 12
         reasons_down.append(
             f"RSI {current_rsi:.1f}"
         )
 
-    elif 48.0 <= current_rsi < 53.0:
+    elif current_rsi < 30:
 
-        # Нейтральная зона.
-        pass
-
-    elif 47.0 < current_rsi <= 52.0:
-
-        pass
-
-    elif current_rsi < 30.0:
-
-        up += 5.0
-
+        up += 5
         reasons_up.append(
             "RSI сильно перепродан"
         )
 
-    elif current_rsi > 70.0:
+    elif current_rsi > 70:
 
-        down += 5.0
-
+        down += 5
         reasons_down.append(
             "RSI сильно перекуплен"
         )
 
-    # ========================================================
     # MACD
-    # ========================================================
-
     if (
         macd_value > macd_signal
         and macd_hist > 0
     ):
 
-        up += 12.0
-
+        up += 12
         reasons_up.append(
             "MACD подтверждает рост"
         )
@@ -927,161 +798,112 @@ def _technical_setup(
         and macd_hist < 0
     ):
 
-        down += 12.0
-
+        down += 12
         reasons_down.append(
             "MACD подтверждает падение"
         )
 
-    # ========================================================
-    # MOMENTUM
-    # ========================================================
-
+    # Momentum
     if momentum > 0:
 
-        up += 8.0
-
+        up += 8
         reasons_up.append(
             "Положительный momentum"
         )
 
     elif momentum < 0:
 
-        down += 8.0
-
+        down += 8
         reasons_down.append(
             "Отрицательный momentum"
         )
 
     if short_momentum > 0:
-
-        up += 4.0
+        up += 4
 
     elif short_momentum < 0:
+        down += 4
 
-        down += 4.0
+    # Stochastic
+    if 55 <= stochastic <= 85:
+        up += 6
 
-    # ========================================================
-    # STOCHASTIC
-    # ========================================================
+    elif 15 <= stochastic <= 45:
+        down += 6
 
-    if (
-        55.0 <= stochastic <= 85.0
-    ):
-
-        up += 6.0
-
-    elif (
-        15.0 <= stochastic <= 45.0
-    ):
-
-        down += 6.0
-
-    # ========================================================
-    # BOLLINGER
-    # ========================================================
-
+    # Bollinger
     if (
         price > bb_middle
         and price < bb_upper
     ):
-
-        up += 5.0
+        up += 5
 
     elif (
         price < bb_middle
         and price > bb_lower
     ):
+        down += 5
 
-        down += 5.0
-
-    # Не покупать прямо на верхней границе.
     if price >= bb_upper:
+        up -= 5
 
-        up -= 5.0
-
-    # Не продавать прямо на нижней границе.
     if price <= bb_lower:
+        down -= 5
 
-        down -= 5.0
-
-    # ========================================================
-    # CANDLE CONFIRMATION
-    # ========================================================
-
+    # Candle
     if (
-        bullish_candle
+        bullish
         and body_ratio >= 0.55
         and close_position >= 0.65
     ):
 
-        up += 7.0
-
+        up += 7
         reasons_up.append(
             "Сильная бычья свеча"
         )
 
     elif (
-        bearish_candle
+        bearish
         and body_ratio >= 0.55
         and close_position <= 0.35
     ):
 
-        down += 7.0
-
+        down += 7
         reasons_down.append(
             "Сильная медвежья свеча"
         )
 
-    # ========================================================
-    # VOLUME
-    # ========================================================
-
+    # Volume
     if volume_ratio >= 1.20:
 
         if up > down:
 
-            up += 4.0
-
+            up += 4
             reasons_up.append(
                 "Объём выше среднего"
             )
 
         elif down > up:
 
-            down += 4.0
-
+            down += 4
             reasons_down.append(
                 "Объём выше среднего"
             )
 
-    # ========================================================
-    # SUPPORT / RESISTANCE
-    # ========================================================
-
-    # Если UP почти упёрся в сопротивление —
-    # уменьшаем вероятность продолжения.
+    # Resistance/support
     if (
         resistance > support
         and resistance_distance
         < current_atr * 0.35
     ):
+        up -= 6
 
-        up -= 6.0
-
-    # Если DOWN почти упёрся в поддержку —
-    # уменьшаем вероятность продолжения.
     if (
         resistance > support
         and support_distance
         < current_atr * 0.35
     ):
-
-        down -= 6.0
-
-    # ========================================================
-    # NORMALIZE
-    # ========================================================
+        down -= 6
 
     up = max(
         0.0,
@@ -1093,86 +915,116 @@ def _technical_setup(
         min(100.0, down),
     )
 
-    total = up + down
+    if up >= down:
 
-    if total <= 0:
-        return None, 0.0, []
-
-    if (
-        up >= down
-        and (
+        if (
             up - down
-            >= MIN_DIRECTION_EDGE
-        )
-    ):
+            < MIN_DIRECTION_EDGE
+        ):
+            return None, 0.0, []
 
         direction = "UP"
-        technical_score = up
+        score = up
         reasons = reasons_up
-
-    elif (
-        down > up
-        and (
-            down - up
-            >= MIN_DIRECTION_EDGE
-        )
-    ):
-
-        direction = "DOWN"
-        technical_score = down
-        reasons = reasons_down
 
     else:
 
-        return None, 0.0, []
+        if (
+            down - up
+            < MIN_DIRECTION_EDGE
+        ):
+            return None, 0.0, []
 
-    # ========================================================
-    # FINAL TECHNICAL SCORE
-    # ========================================================
+        direction = "DOWN"
+        score = down
+        reasons = reasons_down
 
-    # Не превращаем score в fake probability.
-    technical_score = float(
-        min(
-            100.0,
-            technical_score,
-        )
+    score = float(
+        min(100.0, score)
     )
 
-    if (
-        technical_score
-        < MIN_TECHNICAL_SCORE
-    ):
+    if score < MIN_TECHNICAL_SCORE:
+        return None, score, []
 
-        return None, technical_score, []
-
-    # Сильный конфликт momentum.
+    # Жёсткая проверка momentum.
     if direction == "UP":
 
         if (
-            momentum <= MIN_MOMENTUM_EDGE
+            momentum <= 0
             and short_momentum <= 0
         ):
-
-            return None, technical_score, []
+            return None, score, []
 
     else:
 
         if (
-            momentum >= -MIN_MOMENTUM_EDGE
+            momentum >= 0
             and short_momentum >= 0
         ):
-
-            return None, technical_score, []
+            return None, score, []
 
     return (
         direction,
-        technical_score,
+        score,
         reasons,
     )
 
 
 # ============================================================
-# HISTORICAL BACKTEST
+# WILSON LOWER BOUND
+# ============================================================
+
+def _wilson_lower_bound(
+    wins: int,
+    total: int,
+) -> float:
+
+    if total <= 0:
+        return 0.0
+
+    p = wins / total
+
+    z = 1.96
+
+    denominator = (
+        1.0
+        + z * z / total
+    )
+
+    centre = (
+        p
+        + z * z / (2.0 * total)
+    )
+
+    spread = z * np.sqrt(
+        (
+            p * (1.0 - p)
+            / total
+        )
+        + (
+            z * z
+            / (
+                4.0
+                * total
+                * total
+            )
+        )
+    )
+
+    lower = (
+        centre - spread
+    ) / denominator
+
+    return float(
+        max(
+            0.0,
+            min(1.0, lower),
+        )
+    )
+
+
+# ============================================================
+# HISTORICAL TEST
 # ============================================================
 
 def _historical_probability(
@@ -1180,30 +1032,11 @@ def _historical_probability(
     timeframe: int,
     current_score: float,
     current_direction: str,
-) -> tuple[
-    float,
-    int,
-    int,
-]:
-
-    """
-    Строит вероятность только по прошлым ситуациям.
-
-    Ключевой принцип:
-
-        Для исторической точки i
-        используются только свечи <= i.
-
-        Результат проверяется через timeframe
-        свечей ПОСЛЕ i.
-
-    Таким образом будущие свечи не попадают
-    в расчёт технических признаков исторической точки.
-    """
+) -> tuple[float, int, int]:
 
     timeframe = int(timeframe)
 
-    if len(data) < 90:
+    if len(data) < 100:
         return 0.0, 0, 0
 
     wins = 0
@@ -1211,8 +1044,6 @@ def _historical_probability(
 
     start = 60
 
-    # Оставляем достаточно данных после точки,
-    # чтобы определить результат.
     end = (
         len(data)
         - timeframe
@@ -1222,15 +1053,11 @@ def _historical_probability(
     if end <= start:
         return 0.0, 0, 0
 
-    # Чтобы вычисление не становилось огромным.
-    # Берём последние исторические точки.
-    max_history_points = 250
-
-    if end - start > max_history_points:
+    if end - start > MAX_HISTORY_POINTS:
 
         start = (
             end
-            - max_history_points
+            - MAX_HISTORY_POINTS
         )
 
     for i in range(
@@ -1238,30 +1065,29 @@ def _historical_probability(
         end,
     ):
 
-        historical_data = data[
-            :i + 1
-        ]
+        history = data[:i + 1]
 
         (
             direction,
             score,
             _,
         ) = _technical_setup(
-            historical_data
+            history
         )
 
         if direction is None:
             continue
 
-        # Ситуация должна быть достаточно
-        # похожа на текущую.
         if direction != current_direction:
             continue
 
-        if abs(
-            score
-            - current_score
-        ) > SCORE_TOLERANCE:
+        if (
+            abs(
+                score
+                - current_score
+            )
+            > SCORE_TOLERANCE
+        ):
             continue
 
         entry = float(
@@ -1269,8 +1095,7 @@ def _historical_probability(
         )
 
         future_index = (
-            i
-            + timeframe
+            i + timeframe
         )
 
         if future_index >= len(data):
@@ -1280,9 +1105,8 @@ def _historical_probability(
             data[future_index].close
         )
 
+        # DRAW исключаем из denominator.
         if close == entry:
-            # DRAW не считаем WIN.
-            # Это консервативный подход.
             continue
 
         if direction == "UP":
@@ -1304,83 +1128,26 @@ def _historical_probability(
     if total < MIN_HISTORY:
         return 0.0, wins, total
 
-    # --------------------------------------------------------
-    # Wilson lower bound
-    # --------------------------------------------------------
-    #
-    # Это специально консервативная оценка.
-    #
-    # Например:
-    #
-    # 1/1 не превращается в 100%.
-    # 2/2 не превращается в 100%.
-    #
-    # Чем меньше выборка, тем сильнее штраф.
-    # --------------------------------------------------------
-
-    p = wins / total
-
-    z = 1.96
-
-    denominator = (
-        1.0
-        + (
-            z * z
-            / total
-        )
+    lower = _wilson_lower_bound(
+        wins,
+        total,
     )
-
-    centre = (
-        p
-        + (
-            z * z
-            / (
-                2.0 * total
-            )
-        )
-    )
-
-    spread = (
-        z
-        * np.sqrt(
-            (
-                p
-                * (1.0 - p)
-                / total
-            )
-            + (
-                z * z
-                / (
-                    4.0
-                    * total
-                    * total
-                )
-            )
-        )
-    )
-
-    lower = (
-        centre
-        - spread
-    ) / denominator
 
     probability = (
-        lower
-        * 100.0
-    )
-
-    probability = float(
-        max(
-            0.0,
-            min(
-                100.0,
-                probability,
-            ),
-        )
+        lower * 100.0
     )
 
     return (
-        probability,
+        round(
+            max(
+                0.0,
+                min(
+                    100.0,
+                    probability,
+                ),
+            ),
+            1,
+        ),
         wins,
         total,
     )
@@ -1402,27 +1169,38 @@ class SignalEngine:
     ) -> SignalResult | None:
 
         try:
-            timeframe = int(
-                timeframe
-            )
+            timeframe = int(timeframe)
         except (
             TypeError,
             ValueError,
         ):
             return None
 
-        # ----------------------------------------------------
-        # TIMEFRAME
-        # ----------------------------------------------------
+        configured_timeframes = getattr(
+            config,
+            "timeframes",
+            [],
+        )
 
-        if timeframe not in config.timeframes:
+        try:
+
+            allowed = [
+                int(x)
+                for x in configured_timeframes
+            ]
+
+        except Exception:
+
+            allowed = []
+
+        if timeframe not in allowed:
             return None
 
         if not candles:
             return None
 
         # ----------------------------------------------------
-        # LAST CLOSED M1
+        # M1 ENTRY
         # ----------------------------------------------------
 
         now = datetime.now(
@@ -1441,10 +1219,6 @@ class SignalEngine:
             last_m1.close
         )
 
-        # ----------------------------------------------------
-        # ENTRY / CLOSE
-        # ----------------------------------------------------
-
         entry_time = _next_minute(
             now
         )
@@ -1457,7 +1231,7 @@ class SignalEngine:
         )
 
         # ----------------------------------------------------
-        # AGGREGATION
+        # TIMEFRAME DATA
         # ----------------------------------------------------
 
         data = aggregate_candles(
@@ -1483,14 +1257,7 @@ class SignalEngine:
         if direction is None:
             return None
 
-        # ----------------------------------------------------
-        # HARD TECHNICAL FILTER
-        # ----------------------------------------------------
-
-        if (
-            technical_score
-            < MIN_TECHNICAL_SCORE
-        ):
+        if technical_score < MIN_TECHNICAL_SCORE:
             return None
 
         # ----------------------------------------------------
@@ -1508,110 +1275,62 @@ class SignalEngine:
             current_direction=direction,
         )
 
-        # ----------------------------------------------------
-        # НЕ ХВАТАЕТ СТАТИСТИКИ
-        # ----------------------------------------------------
-
+        # Недостаточно истории = НЕТ СИГНАЛА.
         if sample_size < MIN_HISTORY:
-
             return None
-
-        # ----------------------------------------------------
-        # СЛИШКОМ МАЛО WIN
-        # ----------------------------------------------------
 
         if wins < MIN_WINS:
-
             return None
 
-        # ----------------------------------------------------
-        # ЖЁСТКИЙ ПОРOГ 80%
-        # ----------------------------------------------------
-
-        if (
-            historical_probability
-            < MIN_WINRATE
-        ):
-
+        # Жёсткий порог 80%.
+        if historical_probability < MIN_WINRATE:
             return None
 
-        # ----------------------------------------------------
-        # ДОПОЛНИТЕЛЬНАЯ ЗАЩИТА
-        # ----------------------------------------------------
-
-        # Даже если расчёт показывает 80+,
-        # качество самой технической ситуации
-        # не должно быть слабым.
-
+        # Дополнительная защита.
         if technical_score < 75.0:
             return None
-
-        # ----------------------------------------------------
-        # REASONS
-        # ----------------------------------------------------
 
         final_reasons = list(
             reasons
         )
 
         final_reasons.append(
-            (
-                "История: "
-                f"{wins}/{sample_size} "
-                "WIN"
-            )
+            f"История: {wins}/{sample_size} WIN"
         )
 
         final_reasons.append(
             (
                 "Консервативный "
-                f"winrate: "
+                f"исторический winrate: "
                 f"{historical_probability:.1f}%"
             )
         )
 
         final_reasons.append(
-            (
-                "Фильтр: "
-                f">= {MIN_WINRATE:.0f}%"
-            )
+            f"Минимальный фильтр: {MIN_WINRATE:.0f}%"
         )
-
-        # ----------------------------------------------------
-        # RESULT
-        # ----------------------------------------------------
 
         return SignalResult(
             pair=str(pair),
             timeframe=timeframe,
             direction=direction,
-
-            # Это уже НЕ fake technical score.
-            # Это исторически проверенная
-            # консервативная оценка.
             probability=round(
                 historical_probability,
                 1,
             ),
-
-            # Отдельно сохраняем техническое
-            # качество setup.
             quality=round(
                 technical_score,
                 1,
             ),
-
             entry_time=entry_time,
             close_time=close_time,
-
             entry_price=entry_price,
-
             reasons=final_reasons,
         )
 
 
 # ============================================================
-# PUBLIC HELPERS
+# PUBLIC HELPER
 # ============================================================
 
 def calculate_signal(
@@ -1620,13 +1339,7 @@ def calculate_signal(
     candles: list[Candle],
 ) -> SignalResult | None:
 
-    """
-    Совместимый публичный helper.
-    """
-
-    engine = SignalEngine()
-
-    return engine.analyze(
+    return SignalEngine().analyze(
         pair=pair,
         timeframe=timeframe,
         candles=candles,
