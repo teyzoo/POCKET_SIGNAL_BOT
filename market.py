@@ -11,57 +11,60 @@ logger = logging.getLogger("pocket_market")
 
 
 # ============================================================
-# BinaryOptionsToolsV2
+# BINARY OPTIONS TOOLS V2
 # ============================================================
 
 try:
     from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync
 except Exception as exc:
     PocketOptionAsync = None
-    _IMPORT_ERROR = exc
-else:
-    _IMPORT_ERROR = None
+    PO_IMPORT_ERROR = exc
 
 try:
     from BinaryOptionsToolsV2.pocketoption.tools.login import login_async
 except Exception as exc:
     login_async = None
-    _LOGIN_IMPORT_ERROR = exc
-else:
-    _LOGIN_IMPORT_ERROR = None
+    LOGIN_IMPORT_ERROR = exc
 
 
 # ============================================================
 # SETTINGS
 # ============================================================
 
-CONNECT_TIMEOUT = float(
+LOGIN_TIMEOUT = int(
+    getattr(config, "PO_LOGIN_TIMEOUT", 60)
+)
+
+CONNECT_TIMEOUT = int(
     getattr(config, "MARKET_CONNECT_TIMEOUT", 30)
 )
 
-CANDLE_TIMEOUT = float(
-    getattr(config, "MARKET_CANDLE_TIMEOUT", 15)
-)
-
-LOGIN_TIMEOUT = float(
-    getattr(config, "PO_LOGIN_TIMEOUT", 60)
+CANDLE_TIMEOUT = int(
+    getattr(config, "MARKET_CANDLE_TIMEOUT", 20)
 )
 
 CANDLE_LIMIT = int(
     getattr(config, "MARKET_CANDLE_LIMIT", 120)
 )
 
-DEMO = bool(
-    getattr(config, "PO_DEMO", True)
+CACHE_SECONDS = float(
+    getattr(config, "MARKET_CACHE_SECONDS", 2)
 )
 
 AUTO_LOGIN = bool(
     getattr(config, "PO_AUTO_LOGIN", True)
 )
 
-# Pocket Option/BinaryOptionsToolsV2 uses seconds.
-# The bot itself works with timeframe values in minutes.
-SUPPORTED_SECONDS = {
+DEMO = bool(
+    getattr(config, "PO_DEMO", True)
+)
+
+
+# ============================================================
+# TIMEFRAMES
+# ============================================================
+
+TIMEFRAMES = {
     1: 60,
     2: 120,
     3: 180,
@@ -72,48 +75,45 @@ SUPPORTED_SECONDS = {
 }
 
 
-class MarketError(RuntimeError):
-    """Market connection/data error."""
+# ============================================================
+# EXCEPTIONS
+# ============================================================
 
+class MarketError(RuntimeError):
+    pass
+
+
+# ============================================================
+# MARKET CLIENT
+# ============================================================
 
 class PocketMarket:
-    """
-    Pocket Option market client.
-
-    Authentication:
-        PO_EMAIL
-        PO_PASSWORD
-        PO_DEMO=true/false
-
-    SSID:
-        generated automatically by BinaryOptionsToolsV2.
-
-    Important:
-        This class DOES NOT place trades.
-        It is used only for market data.
-    """
 
     def __init__(self) -> None:
+
         self.client: Any = None
+
         self.ssid: Optional[str] = None
 
-        self.connected: bool = False
-        self._connect_lock = asyncio.Lock()
+        self.connected = False
 
         self.last_connect_error: Optional[str] = None
         self.last_data_error: Optional[str] = None
 
-        self._candle_cache: dict[
+        self._connect_lock = asyncio.Lock()
+
+        self._cache: dict[
             tuple[str, int],
             tuple[float, list[dict[str, Any]]],
         ] = {}
 
     # ========================================================
-    # CREDENTIALS
+    # CONFIG
     # ========================================================
 
     @staticmethod
-    def _get_email() -> str:
+    def _email() -> str:
+
         return str(
             getattr(
                 config,
@@ -124,7 +124,8 @@ class PocketMarket:
         ).strip()
 
     @staticmethod
-    def _get_password() -> str:
+    def _password() -> str:
+
         return str(
             getattr(
                 config,
@@ -139,37 +140,35 @@ class PocketMarket:
     # ========================================================
 
     async def _login(self) -> str:
-        """
-        Login to Pocket Option with email/password.
-
-        BinaryOptionsToolsV2 returns a ready-to-use auth SSID.
-        The password is never logged.
-        """
 
         if login_async is None:
+
             raise MarketError(
-                "BinaryOptionsToolsV2 login module unavailable: "
-                f"{_LOGIN_IMPORT_ERROR}"
+                "BinaryOptionsToolsV2 login_async "
+                f"не импортирован: {LOGIN_IMPORT_ERROR}"
             )
 
-        email = self._get_email()
-        password = self._get_password()
+        email = self._email()
+        password = self._password()
 
         if not email:
+
             raise MarketError(
-                "PO_EMAIL is not configured in Render."
+                "PO_EMAIL отсутствует в Render Environment."
             )
 
         if not password:
+
             raise MarketError(
-                "PO_PASSWORD is not configured in Render."
+                "PO_PASSWORD отсутствует в Render Environment."
             )
 
         logger.info(
-            "Pocket Option login started for configured account"
+            "🔐 Авторизация Pocket Option..."
         )
 
         try:
+
             ssid = await asyncio.wait_for(
                 login_async(
                     email,
@@ -177,27 +176,32 @@ class PocketMarket:
                     demo=DEMO,
                     backend="playwright",
                     headless=True,
-                    timeout=int(LOGIN_TIMEOUT),
+                    timeout=LOGIN_TIMEOUT,
                 ),
-                timeout=LOGIN_TIMEOUT + 10,
+                timeout=LOGIN_TIMEOUT + 15,
             )
+
         except asyncio.TimeoutError as exc:
+
             raise MarketError(
-                "Pocket Option login timed out."
+                "Таймаут авторизации Pocket Option."
             ) from exc
+
         except Exception as exc:
-            # Never log credentials.
+
             raise MarketError(
-                f"Pocket Option login failed: {type(exc).__name__}: {exc}"
+                "Ошибка авторизации Pocket Option: "
+                f"{type(exc).__name__}: {exc}"
             ) from exc
 
         if not ssid:
+
             raise MarketError(
-                "Pocket Option login returned an empty SSID."
+                "Pocket Option не вернул SSID после авторизации."
             )
 
         logger.info(
-            "Pocket Option login successful; SSID received internally"
+            "✅ Авторизация Pocket Option успешна."
         )
 
         return str(ssid)
@@ -207,64 +211,61 @@ class PocketMarket:
     # ========================================================
 
     async def connect(self) -> bool:
-        """
-        Connect to Pocket Option.
-
-        Flow:
-
-            Render PO_EMAIL
-                    +
-            Render PO_PASSWORD
-                    ↓
-            BinaryOptionsToolsV2 login
-                    ↓
-            generated SSID
-                    ↓
-            PocketOptionAsync
-        """
 
         async with self._connect_lock:
 
-            if self.connected and self.client is not None:
+            if (
+                self.connected
+                and self.client is not None
+            ):
                 return True
 
             self.connected = False
             self.last_connect_error = None
 
             if PocketOptionAsync is None:
+
                 self.last_connect_error = (
-                    "BinaryOptionsToolsV2 import failed: "
-                    f"{_IMPORT_ERROR}"
+                    "BinaryOptionsToolsV2 не импортирован: "
+                    f"{PO_IMPORT_ERROR}"
                 )
 
-                logger.error(self.last_connect_error)
+                logger.error(
+                    self.last_connect_error
+                )
+
                 return False
 
             if not AUTO_LOGIN:
+
                 self.last_connect_error = (
-                    "PO_AUTO_LOGIN is disabled. "
-                    "Set PO_AUTO_LOGIN=true in Render."
+                    "PO_AUTO_LOGIN=false. "
+                    "Установи PO_AUTO_LOGIN=true."
                 )
 
-                logger.error(self.last_connect_error)
+                logger.error(
+                    self.last_connect_error
+                )
+
                 return False
 
             try:
+
                 logger.info(
-                    "Connecting to Pocket Option..."
+                    "🔌 Подключение к Pocket Option..."
                 )
 
                 # ------------------------------------------------
-                # 1. Login and obtain SSID automatically
+                # LOGIN
                 # ------------------------------------------------
 
                 self.ssid = await asyncio.wait_for(
                     self._login(),
-                    timeout=LOGIN_TIMEOUT + 15,
+                    timeout=LOGIN_TIMEOUT + 20,
                 )
 
                 # ------------------------------------------------
-                # 2. Create PocketOptionAsync client
+                # CLIENT
                 # ------------------------------------------------
 
                 self.client = PocketOptionAsync(
@@ -272,132 +273,124 @@ class PocketMarket:
                 )
 
                 # ------------------------------------------------
-                # 3. Give WebSocket/client time to initialize
+                # WAIT FOR WEBSOCKET
                 # ------------------------------------------------
 
                 await asyncio.sleep(3)
 
                 # ------------------------------------------------
-                # 4. Verify connection using server_time if
-                #    available.
+                # OPTIONAL SERVER TIME CHECK
                 # ------------------------------------------------
 
-                try:
-                    server_time_method = getattr(
-                        self.client,
-                        "server_time",
-                        None,
-                    )
+                server_time = getattr(
+                    self.client,
+                    "server_time",
+                    None,
+                )
 
-                    if callable(server_time_method):
+                if callable(server_time):
+
+                    try:
+
                         await asyncio.wait_for(
-                            server_time_method(),
+                            server_time(),
                             timeout=CONNECT_TIMEOUT,
                         )
 
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Pocket Option server_time check timed out; "
-                        "client will still be tested with candles."
-                    )
+                    except Exception as exc:
 
-                except Exception as exc:
-                    logger.warning(
-                        "server_time check failed: %s",
-                        exc,
-                    )
+                        logger.warning(
+                            "server_time не ответил: %s",
+                            exc,
+                        )
 
                 self.connected = True
 
                 logger.info(
-                    "Pocket Option connection established"
+                    "✅ Pocket Option подключён."
                 )
 
                 return True
 
             except asyncio.TimeoutError:
+
                 self.last_connect_error = (
-                    "Pocket Option connection timed out."
+                    "Таймаут подключения к Pocket Option."
                 )
 
             except Exception as exc:
+
                 self.last_connect_error = (
                     f"{type(exc).__name__}: {exc}"
                 )
 
             self.connected = False
 
-            if self.client is not None:
-                try:
-                    shutdown = getattr(
-                        self.client,
-                        "shutdown",
-                        None,
-                    )
+            try:
 
-                    if callable(shutdown):
-                        await asyncio.wait_for(
-                            shutdown(),
-                            timeout=5,
-                        )
+                await self._shutdown_client()
 
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
-            self.client = None
             self.ssid = None
 
             logger.error(
-                "Pocket Option connection failed: %s",
+                "❌ Pocket Option connection failed: %s",
                 self.last_connect_error,
             )
 
             return False
 
     # ========================================================
-    # CLOSE
+    # SHUTDOWN
     # ========================================================
 
-    async def close(self) -> None:
-        """Close Pocket Option client."""
+    async def _shutdown_client(self) -> None:
 
-        client = self.client
-
-        self.client = None
-        self.connected = False
-        self.ssid = None
-
-        if client is None:
+        if self.client is None:
             return
 
-        try:
-            shutdown = getattr(
-                client,
-                "shutdown",
-                None,
-            )
+        shutdown = getattr(
+            self.client,
+            "shutdown",
+            None,
+        )
 
-            if callable(shutdown):
-                await asyncio.wait_for(
-                    shutdown(),
-                    timeout=5,
-                )
+        if callable(shutdown):
 
-        except Exception as exc:
-            logger.warning(
-                "Pocket Option shutdown error: %s",
-                exc,
-            )
+            try:
+
+                result = shutdown()
+
+                if asyncio.iscoroutine(result):
+
+                    await asyncio.wait_for(
+                        result,
+                        timeout=5,
+                    )
+
+            except Exception:
+                pass
+
+        self.client = None
+
+    async def close(self) -> None:
+
+        self.connected = False
+
+        await self._shutdown_client()
+
+        self.ssid = None
 
     # ========================================================
     # RECONNECT
     # ========================================================
 
     async def reconnect(self) -> bool:
-        """Force a new login and connection."""
 
         logger.warning(
-            "Forcing Pocket Option reconnect..."
+            "🔄 Переподключение к Pocket Option..."
         )
 
         await self.close()
@@ -409,26 +402,22 @@ class PocketMarket:
     # ========================================================
 
     @staticmethod
-    def _timeframe_seconds(timeframe: int) -> int:
+    def _seconds(
+        timeframe: int,
+    ) -> int:
+
         timeframe = int(timeframe)
 
-        if timeframe in SUPPORTED_SECONDS:
-            return SUPPORTED_SECONDS[timeframe]
+        if timeframe in TIMEFRAMES:
 
-        # Allow direct seconds if caller explicitly gives one.
-        if timeframe in (
-            60,
-            120,
-            180,
-            300,
-            600,
-            900,
-            1200,
-        ):
+            return TIMEFRAMES[timeframe]
+
+        if timeframe in TIMEFRAMES.values():
+
             return timeframe
 
         raise MarketError(
-            f"Unsupported timeframe: {timeframe}"
+            f"Неподдерживаемый таймфрейм: {timeframe}"
         )
 
     # ========================================================
@@ -436,51 +425,45 @@ class PocketMarket:
     # ========================================================
 
     @staticmethod
-    def _normalize_candle(
+    def _normalize(
         candle: Any,
     ) -> Optional[dict[str, Any]]:
-        """
-        Convert BinaryOptionsToolsV2 candle objects/dicts
-        into the format expected by signals.py.
-        """
 
         if candle is None:
             return None
 
         # ----------------------------------------------------
-        # Dictionary
+        # DICT
         # ----------------------------------------------------
 
         if isinstance(candle, dict):
-            source = candle
+
+            timestamp = (
+                candle.get("time")
+                or candle.get("timestamp")
+                or candle.get("ts")
+            )
+
+            open_price = candle.get("open")
+            high_price = candle.get("high")
+            low_price = candle.get("low")
+            close_price = candle.get("close")
+
+            if timestamp is None:
+                return None
+
+            if any(
+                value is None
+                for value in (
+                    open_price,
+                    high_price,
+                    low_price,
+                    close_price,
+                )
+            ):
+                return None
 
             try:
-                timestamp = source.get(
-                    "time",
-                    source.get(
-                        "timestamp",
-                        source.get("ts"),
-                    ),
-                )
-
-                open_price = source.get("open")
-                high_price = source.get("high")
-                low_price = source.get("low")
-                close_price = source.get("close")
-
-                if timestamp is None:
-                    return None
-
-                if any(
-                    value is None
-                    for value in (
-                        open_price,
-                        high_price,
-                        low_price,
-                        close_price,
-                    )
-                ):
-                    return None
 
                 return {
                     "time": int(float(timestamp)),
@@ -494,17 +477,23 @@ class PocketMarket:
                 TypeError,
                 ValueError,
             ):
+
                 return None
 
         # ----------------------------------------------------
-        # Object with attributes
+        # OBJECT
         # ----------------------------------------------------
 
         try:
+
             timestamp = getattr(
                 candle,
                 "time",
-                getattr(candle, "timestamp", None),
+                getattr(
+                    candle,
+                    "timestamp",
+                    None,
+                ),
             )
 
             open_price = getattr(
@@ -557,6 +546,7 @@ class PocketMarket:
             TypeError,
             ValueError,
         ):
+
             return None
 
     # ========================================================
@@ -564,146 +554,169 @@ class PocketMarket:
     # ========================================================
 
     @classmethod
-    def _clean_candles(
+    def _clean(
         cls,
         candles: Any,
     ) -> list[dict[str, Any]]:
+
         if not candles:
             return []
 
         if isinstance(candles, dict):
-            # Some versions may wrap candles.
+
             for key in (
                 "candles",
                 "data",
                 "history",
                 "result",
             ):
+
                 if key in candles:
+
                     candles = candles[key]
+
                     break
 
-        if not isinstance(candles, (list, tuple)):
+        if not isinstance(
+            candles,
+            (list, tuple),
+        ):
             return []
 
-        result: list[dict[str, Any]] = []
+        unique: dict[
+            int,
+            dict[str, Any],
+        ] = {}
 
         for item in candles:
-            normalized = cls._normalize_candle(item)
 
-            if normalized is not None:
-                result.append(normalized)
+            normalized = cls._normalize(
+                item
+            )
 
-        # Remove duplicate timestamps.
-        unique: dict[int, dict[str, Any]] = {}
+            if normalized is None:
+                continue
 
-        for candle in result:
-            unique[candle["time"]] = candle
+            unique[
+                normalized["time"]
+            ] = normalized
 
-        result = list(unique.values())
+        result = list(
+            unique.values()
+        )
 
-        # Oldest -> newest.
         result.sort(
-            key=lambda item: item["time"]
+            key=lambda x: x["time"]
         )
 
         return result
 
     # ========================================================
-    # RAW CANDLES
+    # RAW POCKET OPTION CANDLES
     # ========================================================
 
-    async def _get_raw_candles(
+    async def _raw_candles(
         self,
         pair: str,
-        period_seconds: int,
-        lookback_seconds: int,
+        period: int,
+        lookback: int,
     ) -> Any:
-        """
-        Get candles directly from Pocket Option.
-
-        First tries get_candles_live() because the library
-        documents it as the live/gap-free method.
-
-        Falls back to get_candles() for compatibility.
-        """
 
         if self.client is None:
+
             raise MarketError(
-                "Pocket Option client is not initialized."
+                "Pocket Option client не создан."
             )
 
         # ----------------------------------------------------
-        # Preferred: get_candles_live
+        # LIVE CANDLES
         # ----------------------------------------------------
 
-        live_method = getattr(
+        live = getattr(
             self.client,
             "get_candles_live",
             None,
         )
 
-        if callable(live_method):
+        if callable(live):
+
             try:
+
                 hours = max(
                     0.1,
-                    lookback_seconds / 3600.0,
+                    lookback / 3600,
                 )
 
-                iterator = live_method(
+                iterator = live(
                     asset=pair,
-                    period=period_seconds,
+                    period=period,
                     hours=hours,
                     max_rows=max(
                         CANDLE_LIMIT,
-                        100,
+                        120,
                     ),
                 )
 
-                closed, _forming = await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     iterator.__anext__(),
                     timeout=CANDLE_TIMEOUT,
                 )
 
+                if isinstance(
+                    result,
+                    tuple,
+                ):
+
+                    closed = result[0]
+
+                else:
+
+                    closed = result
+
                 if closed:
+
                     return closed
 
             except asyncio.TimeoutError:
+
                 raise
 
             except Exception as exc:
+
                 logger.warning(
-                    "get_candles_live failed for %s: %s",
+                    "get_candles_live error %s: %s",
                     pair,
                     exc,
                 )
 
         # ----------------------------------------------------
-        # Compatibility fallback
+        # HISTORICAL FALLBACK
         # ----------------------------------------------------
 
-        historical_method = getattr(
+        historical = getattr(
             self.client,
             "get_candles",
             None,
         )
 
-        if callable(historical_method):
-            return await asyncio.wait_for(
-                historical_method(
-                    pair,
-                    period_seconds,
-                    lookback_seconds,
-                ),
-                timeout=CANDLE_TIMEOUT,
+        if not callable(historical):
+
+            raise MarketError(
+                "BinaryOptionsToolsV2 "
+                "не имеет метода получения свечей."
             )
 
-        raise MarketError(
-            "BinaryOptionsToolsV2 client has no candle method."
+        return await asyncio.wait_for(
+            historical(
+                pair,
+                period,
+                lookback,
+            ),
+            timeout=CANDLE_TIMEOUT,
         )
 
     # ========================================================
-    # PUBLIC CANDLES
+    # GET CANDLES
     # ========================================================
 
     async def get_candles(
@@ -712,24 +725,17 @@ class PocketMarket:
         timeframe: int = 1,
         limit: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """
-        Return normalized Pocket Option candles.
-
-        timeframe:
-            minutes, e.g. 1 / 2 / 3 / 5 / 10 / 15 / 20
-
-        limit:
-            requested number of candles.
-        """
 
         pair = str(pair).strip()
 
         if not pair:
+
             raise MarketError(
-                "Empty Pocket Option pair."
+                "Пустое название пары."
             )
 
         if limit is None:
+
             limit = CANDLE_LIMIT
 
         limit = max(
@@ -737,87 +743,81 @@ class PocketMarket:
             int(limit),
         )
 
-        period_seconds = self._timeframe_seconds(
-            int(timeframe)
+        period = self._seconds(
+            timeframe
         )
 
-        # Request enough history for indicators.
-        lookback_seconds = max(
-            period_seconds * (limit + 10),
+        lookback = max(
+            period * (limit + 10),
             3600,
         )
 
         cache_key = (
             pair,
-            period_seconds,
+            period,
         )
 
-        # Short cache to avoid opening/fetching the same
-        # market repeatedly during one scan.
-        cache_seconds = float(
-            getattr(
-                config,
-                "MARKET_CACHE_SECONDS",
-                2,
-            )
-        )
-
-        cached = self._candle_cache.get(
+        cached = self._cache.get(
             cache_key
         )
 
         if cached:
-            cached_at, cached_data = cached
+
+            created, data = cached
 
             if (
-                time.monotonic() - cached_at
-                <= cache_seconds
-                and len(cached_data) >= min(
-                    limit,
-                    30,
-                )
+                time.monotonic() - created
+                <= CACHE_SECONDS
+                and len(data) >= 30
             ):
-                return cached_data[-limit:]
+
+                return data[-limit:]
 
         # ----------------------------------------------------
-        # Ensure connection
+        # CONNECT
         # ----------------------------------------------------
 
-        if not self.connected or self.client is None:
-            ok = await self.connect()
+        if (
+            not self.connected
+            or self.client is None
+        ):
 
-            if not ok:
+            connected = await self.connect()
+
+            if not connected:
+
                 raise MarketError(
                     self.last_connect_error
-                    or "Pocket Option connection failed."
+                    or "Pocket Option недоступен."
                 )
 
         # ----------------------------------------------------
-        # Fetch
+        # GET DATA
         # ----------------------------------------------------
 
         try:
-            raw = await self._get_raw_candles(
+
+            raw = await self._raw_candles(
                 pair,
-                period_seconds,
-                lookback_seconds,
+                period,
+                lookback,
             )
 
-            candles = self._clean_candles(
+            candles = self._clean(
                 raw
             )
 
             if len(candles) < 30:
+
                 raise MarketError(
-                    f"Pocket Option returned only "
-                    f"{len(candles)} candles for {pair}."
+                    f"Pocket Option вернул "
+                    f"только {len(candles)} свечей "
+                    f"для {pair}."
                 )
 
-            # Keep requested amount.
             candles = candles[-limit:]
 
-            # Save cache.
-            self._candle_cache[
+            self._cache[
                 cache_key
             ] = (
                 time.monotonic(),
@@ -827,8 +827,8 @@ class PocketMarket:
             self.last_data_error = None
 
             logger.info(
-                "Pocket Option candles: %s | "
-                "timeframe=%sm | count=%d | last=%s",
+                "📊 POCKET OPTION | "
+                "%s | %sm | candles=%d | close=%s",
                 pair,
                 timeframe,
                 len(candles),
@@ -838,27 +838,32 @@ class PocketMarket:
             return candles
 
         except asyncio.TimeoutError as exc:
+
+            self.connected = False
+
             self.last_data_error = (
-                f"Timeout while getting candles for {pair}"
+                f"Таймаут получения свечей "
+                f"{pair}."
             )
 
             logger.error(
                 self.last_data_error
             )
 
-            # Connection may have become stale.
-            self.connected = False
-
             raise MarketError(
                 self.last_data_error
             ) from exc
 
         except MarketError:
+
             raise
 
         except Exception as exc:
+
+            self.connected = False
+
             self.last_data_error = (
-                f"Candle request failed for {pair}: "
+                f"Ошибка свечей {pair}: "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -866,14 +871,12 @@ class PocketMarket:
                 self.last_data_error
             )
 
-            self.connected = False
-
             raise MarketError(
                 self.last_data_error
             ) from exc
 
     # ========================================================
-    # COMPATIBILITY ALIASES
+    # COMPATIBILITY: CANDLES
     # ========================================================
 
     async def candles(
@@ -882,46 +885,27 @@ class PocketMarket:
         period: int = 60,
         limit: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """
-        Compatibility method.
-
-        Existing code may call:
-            market.candles("EURUSD_otc", 60)
-
-        or:
-            market.candles("EURUSD_otc", 1)
-        """
 
         period = int(period)
 
-        if period in SUPPORTED_SECONDS:
+        if period in TIMEFRAMES:
+
             timeframe = period
 
-        elif period in SUPPORTED_SECONDS.values():
+        elif period in TIMEFRAMES.values():
+
             timeframe = next(
                 key
-                for key, value in SUPPORTED_SECONDS.items()
+                for key, value
+                in TIMEFRAMES.items()
                 if value == period
             )
 
         else:
+
             raise MarketError(
-                f"Unsupported candle period: {period}"
+                f"Неподдерживаемый период: {period}"
             )
-
-        return await self.get_candles(
-            pair,
-            timeframe,
-            limit,
-        )
-
-    async def history(
-        self,
-        pair: str,
-        timeframe: int = 1,
-        limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        """Alias for get_candles()."""
 
         return await self.get_candles(
             pair,
@@ -937,11 +921,9 @@ class PocketMarket:
         self,
         pair: str = "EURUSD_otc",
     ) -> bool:
-        """
-        Check actual Pocket Option market data.
-        """
 
         try:
+
             candles = await self.get_candles(
                 pair,
                 1,
@@ -951,8 +933,9 @@ class PocketMarket:
             return len(candles) >= 30
 
         except Exception as exc:
+
             logger.error(
-                "Pocket Option health check failed: %s",
+                "❌ Market health check: %s",
                 exc,
             )
 
@@ -960,25 +943,28 @@ class PocketMarket:
 
 
 # ============================================================
-# GLOBAL MARKET INSTANCE
+# GLOBAL INSTANCE
 # ============================================================
 
 market = PocketMarket()
 
 
 # ============================================================
-# MODULE-LEVEL COMPATIBILITY FUNCTIONS
+# MODULE FUNCTIONS
 # ============================================================
 
 async def connect() -> bool:
+
     return await market.connect()
 
 
 async def close() -> None:
+
     await market.close()
 
 
 async def reconnect() -> bool:
+
     return await market.reconnect()
 
 
@@ -987,6 +973,7 @@ async def get_candles(
     timeframe: int = 1,
     limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
+
     return await market.get_candles(
         pair,
         timeframe,
@@ -999,6 +986,7 @@ async def candles(
     period: int = 60,
     limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
+
     return await market.candles(
         pair,
         period,
@@ -1006,90 +994,16 @@ async def candles(
     )
 
 
-async def history(
-    pair: str,
-    timeframe: int = 1,
-    limit: Optional[int] = None,
-) -> list[dict[str, Any]]:
-    return await market.history(
-        pair,
-        timeframe,
-        limit,
-    )
-
-
 async def health_check(
     pair: str = "EURUSD_otc",
 ) -> bool:
-    return await market.health_check(pair)
 
-
-# ============================================================
-# OPTIONAL OBJECT-STYLE API
-# ============================================================
-
-class Market:
-    """
-    Compatibility wrapper for code that imports Market().
-    """
-
-    def __init__(self) -> None:
-        self._market = market
-
-    async def connect(self) -> bool:
-        return await self._market.connect()
-
-    async def close(self) -> None:
-        await self._market.close()
-
-    async def reconnect(self) -> bool:
-        return await self._market.reconnect()
-
-    async def get_candles(
-        self,
-        pair: str,
-        timeframe: int = 1,
-        limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        return await self._market.get_candles(
-            pair,
-            timeframe,
-            limit,
-        )
-
-    async def candles(
-        self,
-        pair: str,
-        period: int = 60,
-        limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        return await self._market.candles(
-            pair,
-            period,
-            limit,
-        )
-
-    async def history(
-        self,
-        pair: str,
-        timeframe: int = 1,
-        limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        return await self._market.history(
-            pair,
-            timeframe,
-            limit,
-        )
-
-    async def health_check(
-        self,
-        pair: str = "EURUSD_otc",
-    ) -> bool:
-        return await self._market.health_check(pair)
+    return await market.health_check(
+        pair
+    )
 
 
 __all__ = [
-    "Market",
     "MarketError",
     "PocketMarket",
     "market",
@@ -1098,27 +1012,5 @@ __all__ = [
     "reconnect",
     "get_candles",
     "candles",
-    "history",
     "health_check",
 ]
-
-Что сделать сейчас
-
-В GitHub Web открой:
-
-"market.py" → Edit → выдели всё → вставь код выше → Commit changes.
-
-В Render должны остаться:
-
-PO_EMAIL = твой email Pocket Option
-PO_PASSWORD = твой пароль Pocket Option
-PO_AUTO_LOGIN = true
-PO_DEMO = true
-
-"PO_SSID" не нужен.
-
-И ещё: этот вариант использует Playwright для автоматического получения SSID при входе, поэтому твой уже установленный Playwright здесь как раз пригодится. Сам "BinaryOptionsToolsV2" документирует такой login backend и затем передачу полученного SSID в "PocketOptionAsync".
-
-Важно: я специально не добавлял никаких операций покупки/продажи — "market.py" только авторизуется и получает котировки/свечи. OTC теперь будет запрашиваться именно через Pocket Option-клиент, а не через BiQuote/Twelve Data.
-
-После этого не запускай сразу повторный сигнал. Сначала посмотрим Render Logs после деплоя — по ним будет видно, прошёл ли "PO_EMAIL/PO_PASSWORD" → login → SSID → WebSocket → "EURUSD_otc".
