@@ -23,12 +23,13 @@ BIQUOTE_BASE_URL = getattr(
     "https://biquote.io",
 ).rstrip("/")
 
-TWELVE_DATA_BASE_URL = (
-    "https://api.twelvedata.com"
-)
+TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
 
-HTTP_TIMEOUT = 12
-CONNECT_TIMEOUT = 8
+# Жёсткие таймауты.
+HTTP_TIMEOUT = 10
+CONNECT_TIMEOUT = 5
+PROVIDER_TIMEOUT = 7
+TOTAL_CONNECT_TIMEOUT = 16
 
 MIN_CANDLES = 60
 DEFAULT_CANDLE_LIMIT = 1600
@@ -51,21 +52,16 @@ class Candle:
 def _float(value: Any) -> Optional[float]:
     try:
         return float(value)
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
         return None
 
 
 def _datetime(value: Any) -> Optional[datetime]:
-
     if value is None:
         return None
 
     if isinstance(value, datetime):
         dt = value
-
     else:
         text = str(value).strip()
 
@@ -74,17 +70,11 @@ def _datetime(value: Any) -> Optional[datetime]:
 
         try:
             if text.endswith("Z"):
-                text = (
-                    text[:-1]
-                    + "+00:00"
-                )
+                text = text[:-1] + "+00:00"
 
-            dt = datetime.fromisoformat(
-                text
-            )
+            dt = datetime.fromisoformat(text)
 
         except ValueError:
-
             try:
                 timestamp = float(value)
 
@@ -100,17 +90,12 @@ def _datetime(value: Any) -> Optional[datetime]:
                 return None
 
     if dt.tzinfo is None:
-        dt = dt.replace(
-            tzinfo=timezone.utc
-        )
+        dt = dt.replace(tzinfo=timezone.utc)
 
-    return dt.astimezone(
-        timezone.utc
-    )
+    return dt.astimezone(timezone.utc)
 
 
 def _clean_pair(pair: str) -> str:
-
     value = str(pair).strip().upper()
 
     for suffix in (
@@ -118,33 +103,23 @@ def _clean_pair(pair: str) -> str:
         " OTC",
         "-OTC",
     ):
-        value = value.replace(
-            suffix,
-            "",
-        )
+        value = value.replace(suffix, "")
 
     for char in (
         "/",
         "-",
         "_",
     ):
-        value = value.replace(
-            char,
-            "",
-        )
+        value = value.replace(char, "")
 
     return value
 
 
 def _twelve_symbol(pair: str) -> str:
-
     clean = _clean_pair(pair)
 
     if len(clean) == 6:
-        return (
-            f"{clean[:3]}/"
-            f"{clean[3:]}"
-        )
+        return f"{clean[:3]}/{clean[3:]}"
 
     return clean
 
@@ -152,13 +127,10 @@ def _twelve_symbol(pair: str) -> str:
 def _unique_candles(
     candles: list[Candle],
 ) -> list[Candle]:
-
-    result = {}
+    result: dict[int, Candle] = {}
 
     for candle in candles:
-        result[
-            int(candle.time.timestamp())
-        ] = candle
+        result[int(candle.time.timestamp())] = candle
 
     return sorted(
         result.values(),
@@ -169,20 +141,18 @@ def _unique_candles(
 class PocketMarket:
 
     def __init__(self):
-
-        self.client: Optional[
-            aiohttp.ClientSession
-        ] = None
+        self.client: Optional[aiohttp.ClientSession] = None
 
         self.connected = False
-        self.provider = None
+        self.provider: Optional[str] = None
 
         self._lock = asyncio.Lock()
-
-        self._cache = {}
+        self._cache: dict[
+            tuple[str, int],
+            tuple[float, list[Candle]],
+        ] = {}
 
     async def _ensure_client(self):
-
         if (
             self.client is not None
             and not self.client.closed
@@ -199,10 +169,8 @@ class PocketMarket:
         self.client = aiohttp.ClientSession(
             timeout=timeout,
             headers={
-                "User-Agent":
-                    "POCKET_SIGNAL_BOT/4.0",
-                "Accept":
-                    "application/json",
+                "User-Agent": "POCKET_SIGNAL_BOT/5.0",
+                "Accept": "application/json",
             },
         )
 
@@ -211,12 +179,9 @@ class PocketMarket:
     async def _get_json(
         self,
         url: str,
-        params: Optional[
-            dict[str, Any]
-        ] = None,
+        params: Optional[dict[str, Any]] = None,
         timeout_seconds: float = HTTP_TIMEOUT,
     ):
-
         client = await self._ensure_client()
 
         logger.info(
@@ -226,11 +191,7 @@ class PocketMarket:
         )
 
         try:
-
-            async with asyncio.timeout(
-                timeout_seconds
-            ):
-
+            async with asyncio.timeout(timeout_seconds):
                 async with client.get(
                     url,
                     params=params,
@@ -245,23 +206,135 @@ class PocketMarket:
                         )
 
                     try:
-                        return json.loads(text)
+                        data = json.loads(text)
 
                     except Exception as exc:
                         raise RuntimeError(
-                            "Provider вернул "
-                            "не JSON: "
+                            "Provider вернул не JSON: "
                             f"{text[:300]}"
                         ) from exc
 
-        except asyncio.TimeoutError:
+                    return data
+
+        except asyncio.TimeoutError as exc:
             raise RuntimeError(
                 f"Таймаут источника рынка "
-                f"{timeout_seconds:.0f} сек"
+                f"({timeout_seconds:.0f} сек)"
+            ) from exc
+
+        except aiohttp.ClientError as exc:
+            raise RuntimeError(
+                f"Ошибка HTTP: {exc}"
+            ) from exc
+
+    async def _check_biquote(self) -> bool:
+        logger.info(
+            "[MARKET] Проверяю BiQuote..."
+        )
+
+        try:
+            data = await self._get_json(
+                f"{BIQUOTE_BASE_URL}/api/EURUSD",
+                timeout_seconds=PROVIDER_TIMEOUT,
             )
 
-    async def connect(self) -> bool:
+            if not isinstance(data, dict):
+                raise RuntimeError(
+                    "BiQuote вернул неожиданный формат"
+                )
 
+            price = (
+                data.get("last")
+                or data.get("bid")
+                or data.get("ask")
+            )
+
+            price = _float(price)
+
+            if price is None:
+                raise RuntimeError(
+                    "BiQuote не вернул цену EURUSD"
+                )
+
+            logger.info(
+                "[MARKET] ✅ BiQuote отвечает. "
+                "EURUSD=%s",
+                price,
+            )
+
+            return True
+
+        except Exception as exc:
+            logger.warning(
+                "[MARKET] ❌ BiQuote: %s",
+                exc,
+            )
+            return False
+
+    async def _check_twelve_data(self) -> bool:
+        api_key = getattr(
+            config,
+            "TWELVE_DATA_API_KEY",
+            "",
+        )
+
+        if not api_key:
+            logger.warning(
+                "[MARKET] Twelve Data пропущен: "
+                "TWELVE_DATA_API_KEY отсутствует"
+            )
+            return False
+
+        logger.info(
+            "[MARKET] Проверяю Twelve Data..."
+        )
+
+        try:
+            data = await self._get_json(
+                f"{TWELVE_DATA_BASE_URL}/time_series",
+                params={
+                    "symbol": "EUR/USD",
+                    "interval": "1min",
+                    "outputsize": 2,
+                    "timezone": "UTC",
+                    "apikey": api_key,
+                },
+                timeout_seconds=PROVIDER_TIMEOUT,
+            )
+
+            if not isinstance(data, dict):
+                raise RuntimeError(
+                    "Twelve Data вернул неожиданный формат"
+                )
+
+            values = data.get("values")
+
+            if not values:
+                message = data.get("message")
+
+                if message:
+                    raise RuntimeError(
+                        f"Twelve Data: {message}"
+                    )
+
+                raise RuntimeError(
+                    "Twelve Data не вернул свечи"
+                )
+
+            logger.info(
+                "[MARKET] ✅ Twelve Data отвечает"
+            )
+
+            return True
+
+        except Exception as exc:
+            logger.warning(
+                "[MARKET] ❌ Twelve Data: %s",
+                exc,
+            )
+            return False
+
+    async def connect(self) -> bool:
         async with self._lock:
 
             if (
@@ -269,6 +342,10 @@ class PocketMarket:
                 and self.client is not None
                 and not self.client.closed
             ):
+                logger.info(
+                    "[MARKET] Уже подключён: %s",
+                    self.provider,
+                )
                 return True
 
             self.connected = False
@@ -278,117 +355,74 @@ class PocketMarket:
                 "[MARKET] 🔌 ПРОВЕРКА РЫНКА"
             )
 
-            # -----------------------------
-            # BIQUOTE
-            # -----------------------------
-
             try:
-
-                logger.info(
-                    "[MARKET] Проверяю BiQuote..."
+                result = await asyncio.wait_for(
+                    self._connect_internal(),
+                    timeout=TOTAL_CONNECT_TIMEOUT,
                 )
 
-                data = await self._get_json(
-                    f"{BIQUOTE_BASE_URL}/api/EURUSD",
-                    timeout_seconds=8,
+                return result
+
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[MARKET] ❌ ОБЩИЙ ТАЙМАУТ "
+                    "подключения к источнику рынка"
                 )
 
-                if isinstance(data, dict):
+                self.connected = False
+                self.provider = None
 
-                    price = (
-                        data.get("last")
-                        or data.get("bid")
-                        or data.get("ask")
-                    )
-
-                    if _float(price) is not None:
-
-                        self.connected = True
-                        self.provider = "biquote"
-
-                        logger.info(
-                            "[MARKET] "
-                            "✅ BiQuote подключён"
-                        )
-
-                        return True
+                return False
 
             except Exception as exc:
-
-                logger.warning(
-                    "[MARKET] BiQuote: %s",
+                logger.exception(
+                    "[MARKET] ❌ Ошибка подключения: %s",
                     exc,
                 )
 
-            # -----------------------------
-            # TWELVE DATA
-            # -----------------------------
+                self.connected = False
+                self.provider = None
 
-            api_key = getattr(
-                config,
-                "TWELVE_DATA_API_KEY",
-                "",
+                return False
+
+    async def _connect_internal(self) -> bool:
+
+        # -------------------------------------------------
+        # 1. BIQUOTE
+        # -------------------------------------------------
+
+        if await self._check_biquote():
+
+            self.connected = True
+            self.provider = "biquote"
+
+            logger.info(
+                "[MARKET] 🟢 Источник рынка: BiQuote"
             )
 
-            if api_key:
+            return True
 
-                try:
+        # -------------------------------------------------
+        # 2. TWELVE DATA
+        # -------------------------------------------------
 
-                    logger.info(
-                        "[MARKET] "
-                        "Проверяю Twelve Data..."
-                    )
+        if await self._check_twelve_data():
 
-                    data = await self._get_json(
-                        f"{TWELVE_DATA_BASE_URL}"
-                        "/time_series",
-                        params={
-                            "symbol": "EUR/USD",
-                            "interval": "1min",
-                            "outputsize": 2,
-                            "timezone": "UTC",
-                            "apikey": api_key,
-                        },
-                        timeout_seconds=8,
-                    )
+            self.connected = True
+            self.provider = "twelve_data"
 
-                    values = (
-                        data.get("values")
-                        if isinstance(
-                            data,
-                            dict,
-                        )
-                        else None
-                    )
-
-                    if values:
-
-                        self.connected = True
-                        self.provider = (
-                            "twelve_data"
-                        )
-
-                        logger.info(
-                            "[MARKET] "
-                            "✅ Twelve Data "
-                            "подключён"
-                        )
-
-                        return True
-
-                except Exception as exc:
-
-                    logger.warning(
-                        "[MARKET] Twelve Data: %s",
-                        exc,
-                    )
-
-            logger.error(
-                "[MARKET] ❌ "
-                "Источник рынка недоступен"
+            logger.info(
+                "[MARKET] 🟢 Источник рынка: Twelve Data"
             )
 
-            return False
+            return True
+
+        logger.error(
+            "[MARKET] 🔴 НИ ОДИН ИСТОЧНИК "
+            "РЫНКА НЕ ДОСТУПЕН"
+        )
+
+        return False
 
     async def _biquote_candles(
         self,
@@ -410,7 +444,7 @@ class PocketMarket:
                 "interval": "1m",
                 "limit": target,
             },
-            timeout_seconds=12,
+            timeout_seconds=HTTP_TIMEOUT,
         )
 
         bars = (
@@ -419,7 +453,7 @@ class PocketMarket:
             else []
         )
 
-        candles = []
+        candles: list[Candle] = []
 
         for item in bars:
 
@@ -436,12 +470,15 @@ class PocketMarket:
             o = _float(
                 item.get("open")
             )
+
             h = _float(
                 item.get("high")
             )
+
             l = _float(
                 item.get("low")
             )
+
             c = _float(
                 item.get("close")
             )
@@ -479,9 +516,9 @@ class PocketMarket:
                 )
             )
 
-        return _unique_candles(candles)[
-            -target:
-        ]
+        result = _unique_candles(candles)
+
+        return result[-target:]
 
     async def _twelve_candles(
         self,
@@ -508,8 +545,7 @@ class PocketMarket:
         )
 
         data = await self._get_json(
-            f"{TWELVE_DATA_BASE_URL}"
-            "/time_series",
+            f"{TWELVE_DATA_BASE_URL}/time_series",
             params={
                 "symbol": symbol,
                 "interval": "1min",
@@ -517,16 +553,27 @@ class PocketMarket:
                 "timezone": "UTC",
                 "apikey": api_key,
             },
-            timeout_seconds=12,
+            timeout_seconds=HTTP_TIMEOUT,
         )
 
-        values = (
-            data.get("values", [])
-            if isinstance(data, dict)
-            else []
-        )
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                "Twelve Data вернул неправильный формат"
+            )
 
-        candles = []
+        if data.get("status") == "error":
+            raise RuntimeError(
+                str(
+                    data.get(
+                        "message",
+                        "Twelve Data error",
+                    )
+                )
+            )
+
+        values = data.get("values", [])
+
+        candles: list[Candle] = []
 
         for item in values:
 
@@ -540,12 +587,15 @@ class PocketMarket:
             o = _float(
                 item.get("open")
             )
+
             h = _float(
                 item.get("high")
             )
+
             l = _float(
                 item.get("low")
             )
+
             c = _float(
                 item.get("close")
             )
@@ -580,9 +630,9 @@ class PocketMarket:
                 )
             )
 
-        return _unique_candles(candles)[
-            -outputsize:
-        ]
+        result = _unique_candles(candles)
+
+        return result[-outputsize:]
 
     async def candles(
         self,
@@ -590,10 +640,19 @@ class PocketMarket:
         limit: int = DEFAULT_CANDLE_LIMIT,
     ) -> list[Candle]:
 
-        if not self.connected:
+        # Если подключение пропало —
+        # автоматически пробуем переподключиться.
+        if not self.is_connected():
+
+            logger.info(
+                "[MARKET] Соединение отсутствует. "
+                "Переподключение..."
+            )
+
             if not await self.connect():
                 raise RuntimeError(
-                    "Рынок не подключён"
+                    "Источник рынка недоступен. "
+                    "Проверь Render logs и API-ключ."
                 )
 
         key = (
@@ -624,17 +683,44 @@ class PocketMarket:
                 now - cached_at
                 < cache_seconds
             ):
+                logger.info(
+                    "[MARKET] %s: использую кеш "
+                    "(%s свечей)",
+                    pair,
+                    len(cached_data),
+                )
+
                 return list(cached_data)
+
+        data: list[Candle] = []
+
+        # -------------------------------------------------
+        # Основной источник
+        # -------------------------------------------------
 
         try:
 
             if self.provider == "biquote":
+
+                logger.info(
+                    "[MARKET] Получаю свечи %s "
+                    "через BiQuote...",
+                    pair,
+                )
+
                 data = await self._biquote_candles(
                     pair,
                     limit,
                 )
 
             elif self.provider == "twelve_data":
+
+                logger.info(
+                    "[MARKET] Получаю свечи %s "
+                    "через Twelve Data...",
+                    pair,
+                )
+
                 data = await self._twelve_candles(
                     pair,
                     limit,
@@ -642,16 +728,21 @@ class PocketMarket:
 
             else:
                 raise RuntimeError(
-                    "Неизвестный provider"
+                    "Неизвестный источник рынка"
                 )
 
         except Exception as primary_exc:
 
             logger.warning(
-                "[MARKET] Ошибка %s: %s",
+                "[MARKET] Ошибка %s через %s: %s",
                 pair,
+                self.provider,
                 primary_exc,
             )
+
+            # -------------------------------------------------
+            # Fallback на Twelve Data
+            # -------------------------------------------------
 
             if (
                 self.provider != "twelve_data"
@@ -663,6 +754,12 @@ class PocketMarket:
             ):
 
                 try:
+
+                    logger.info(
+                        "[MARKET] Fallback %s -> Twelve Data",
+                        pair,
+                    )
+
                     data = await self._twelve_candles(
                         pair,
                         limit,
@@ -670,19 +767,39 @@ class PocketMarket:
 
                     self.provider = "twelve_data"
 
-                except Exception:
-                    raise primary_exc
+                except Exception as fallback_exc:
+
+                    logger.error(
+                        "[MARKET] Fallback тоже не сработал: %s",
+                        fallback_exc,
+                    )
+
+                    raise RuntimeError(
+                        f"{pair}: источник рынка "
+                        f"не смог получить свечи"
+                    ) from fallback_exc
 
             else:
-                raise
+                raise RuntimeError(
+                    f"{pair}: не удалось получить свечи: "
+                    f"{primary_exc}"
+                ) from primary_exc
+
+        # -------------------------------------------------
+        # Проверяем количество свечей
+        # -------------------------------------------------
 
         if len(data) < MIN_CANDLES:
 
             raise RuntimeError(
-                f"{pair}: получено "
-                f"{len(data)} свечей, "
-                f"нужно минимум {MIN_CANDLES}"
+                f"{pair}: получено только "
+                f"{len(data)} свечей. "
+                f"Нужно минимум {MIN_CANDLES}."
             )
+
+        # -------------------------------------------------
+        # Сохраняем кеш
+        # -------------------------------------------------
 
         self._cache[key] = (
             now,
@@ -690,9 +807,11 @@ class PocketMarket:
         )
 
         logger.info(
-            "[MARKET] %s: %s свечей",
+            "[MARKET] ✅ %s: получено %s свечей "
+            "через %s",
             pair,
             len(data),
+            self.provider,
         )
 
         return data
@@ -717,18 +836,32 @@ class PocketMarket:
         )
 
     async def balance(self):
-
         return None
 
     async def close(self):
 
+        logger.info(
+            "[MARKET] Закрываю соединение..."
+        )
+
         self.connected = False
         self.provider = None
+        self._cache.clear()
 
         if (
             self.client is not None
             and not self.client.closed
         ):
-            await self.client.close()
+            try:
+                await self.client.close()
+            except Exception as exc:
+                logger.warning(
+                    "[MARKET] Ошибка закрытия: %s",
+                    exc,
+                )
 
         self.client = None
+
+        logger.info(
+            "[MARKET] Соединение закрыто"
+        )
